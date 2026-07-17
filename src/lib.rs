@@ -1,3 +1,6 @@
+pub mod sharded;
+pub mod workload;
+
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug)]
@@ -43,6 +46,14 @@ impl Graph {
 
         if !self.users.contains_key(&target) {
             return Err(format!("Target user {target} does not exist"));
+        }
+
+        self.add_follow_unchecked(source, target)
+    }
+
+    pub(crate) fn add_follow_unchecked(&mut self, source: u64, target: u64) -> Result<(), String> {
+        if !self.users.contains_key(&source) {
+            return Err(format!("Source user {source} does not exist"));
         }
 
         let targets = self.follows.entry(source).or_default();

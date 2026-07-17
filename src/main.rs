@@ -1,39 +1,50 @@
-use graph_shard_lab::Graph;
+use std::time::Instant;
+
+use graph_shard_lab::sharded::ShardedGraph;
 
 fn main() -> Result<(), String> {
-    let mut graph = Graph::new();
+    let user_count = 10_000;
+    let edges_per_user = 8;
+    let shard_count = 4;
 
-    graph.add_user(1, "Alice")?;
-    graph.add_user(2, "Bob")?;
-    graph.add_user(3, "Charlie")?;
-    graph.add_user(4, "Diana")?;
+    let started = Instant::now();
 
-    graph.add_follow(1, 2)?;
-    graph.add_follow(1, 3)?;
-    graph.add_follow(2, 3)?;
-    graph.add_follow(3, 4)?;
+    let mut graph = ShardedGraph::new(shard_count)?;
 
-    let alice = graph.get_user(1).ok_or("Alice should exist")?;
+    for id in 1..=user_count {
+        graph.add_user(id, &format!("user-{id}"))?;
+    }
+
+    for source in 1..=user_count {
+        for offset in 1..=edges_per_user {
+            let target = ((source - 1 + offset) % user_count) + 1;
+            graph.add_follow(source, target)?;
+        }
+    }
 
     println!(
-        "Graph contains {} users and {} edges",
+        "Built graph with {} users, {} edges and {} shards in {:?}",
         graph.user_count(),
-        graph.edge_count()
+        graph.edge_count(),
+        graph.shard_count(),
+        started.elapsed()
     );
 
-    println!("\n{} follows:", alice.name);
+    println!("Users per shard: {:?}", graph.users_per_shard());
 
-    for id in graph.get_following_ids(alice.id) {
-        let user = graph.get_user(*id).ok_or("Referenced user is missing")?;
-        println!("  {}", user.name);
-    }
+    let source = 1;
+    let query_started = Instant::now();
 
-    println!("\nReachable from {} in exactly two hops:", alice.name);
+    let result = graph.get_two_hop_with_stats(source);
 
-    for id in graph.get_two_hop_ids(alice.id) {
-        let user = graph.get_user(id).ok_or("Referenced user is missing")?;
-        println!("  {}", user.name);
-    }
+    println!(
+        "Two-hop query returned {} users in {:?}",
+        result.user_ids.len(),
+        query_started.elapsed()
+    );
+
+    println!("Shards touched: {}", result.shards_touched);
+    println!("Cross-shard hops: {}", result.cross_shard_hops);
 
     Ok(())
 }
