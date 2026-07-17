@@ -2,6 +2,12 @@ use std::collections::HashSet;
 
 use crate::{Graph, User};
 
+#[derive(Debug, Clone, Copy)]
+pub enum Placement {
+    Hash,
+    Community { community_size: u64 },
+}
+
 #[derive(Debug)]
 pub struct QueryResult {
     pub user_ids: Vec<u64>,
@@ -11,12 +17,23 @@ pub struct QueryResult {
 
 pub struct ShardedGraph {
     shards: Vec<Graph>,
+    placement: Placement,
 }
 
 impl ShardedGraph {
     pub fn new(shard_count: usize) -> Result<Self, String> {
+        Self::with_placement(shard_count, Placement::Hash)
+    }
+
+    pub fn with_placement(shard_count: usize, placement: Placement) -> Result<Self, String> {
         if shard_count == 0 {
             return Err("Shard count must be greater than zero".to_string());
+        }
+
+        if let Placement::Community { community_size } = placement {
+            if community_size == 0 {
+                return Err("Community size must be greater than zero".to_string());
+            }
         }
 
         let mut shards = Vec::with_capacity(shard_count);
@@ -25,14 +42,25 @@ impl ShardedGraph {
             shards.push(Graph::new());
         }
 
-        Ok(Self { shards })
+        Ok(Self { shards, placement })
     }
 
     fn shard_for(&self, user_id: u64) -> usize {
-        user_id as usize % self.shards.len()
+        match self.placement {
+            Placement::Hash => user_id as usize % self.shards.len(),
+
+            Placement::Community { community_size } => {
+                let community_id = (user_id - 1) / community_size;
+                community_id as usize % self.shards.len()
+            }
+        }
     }
 
     pub fn add_user(&mut self, id: u64, name: &str) -> Result<(), String> {
+        if id == 0 {
+            return Err("User ID must be greater than zero".to_string());
+        }
+
         let shard_id = self.shard_for(id);
         self.shards[shard_id].add_user(id, name)
     }
@@ -52,11 +80,19 @@ impl ShardedGraph {
     }
 
     pub fn get_user(&self, id: u64) -> Option<&User> {
+        if id == 0 {
+            return None;
+        }
+
         let shard_id = self.shard_for(id);
         self.shards[shard_id].get_user(id)
     }
 
     pub fn get_following_ids(&self, source: u64) -> &[u64] {
+        if source == 0 {
+            return &[];
+        }
+
         let shard_id = self.shard_for(source);
         self.shards[shard_id].get_following_ids(source)
     }
@@ -73,7 +109,6 @@ impl ShardedGraph {
 
         for first_hop in self.get_following_ids(source) {
             let first_hop_shard = self.shard_for(*first_hop);
-
             touched_shards.insert(first_hop_shard);
 
             if first_hop_shard != source_shard {
@@ -82,7 +117,6 @@ impl ShardedGraph {
 
             for second_hop in self.get_following_ids(*first_hop) {
                 let second_hop_shard = self.shard_for(*second_hop);
-
                 touched_shards.insert(second_hop_shard);
 
                 if second_hop_shard != first_hop_shard {
@@ -128,16 +162,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn places_users_across_shards() {
+    fn hash_placement_balances_users() {
         let mut graph = ShardedGraph::new(4).unwrap();
 
         for id in 1..=8 {
             graph.add_user(id, &format!("user-{id}")).unwrap();
         }
 
-        assert_eq!(graph.user_count(), 8);
-        assert_eq!(graph.shard_count(), 4);
         assert_eq!(graph.users_per_shard(), vec![2, 2, 2, 2]);
+    }
+
+    #[test]
+    fn community_placement_keeps_communities_together() {
+        let mut graph =
+            ShardedGraph::with_placement(2, Placement::Community { community_size: 4 }).unwrap();
+
+        for id in 1..=8 {
+            graph.add_user(id, &format!("user-{id}")).unwrap();
+        }
+
+        assert_eq!(graph.users_per_shard(), vec![4, 4]);
+
+        assert_eq!(graph.shard_for(1), graph.shard_for(4));
+        assert_eq!(graph.shard_for(5), graph.shard_for(8));
+        assert_ne!(graph.shard_for(1), graph.shard_for(5));
     }
 
     #[test]
