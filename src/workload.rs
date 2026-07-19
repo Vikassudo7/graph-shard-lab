@@ -25,6 +25,99 @@ pub fn build_uniform_graph(user_count: u64, edges_per_user: u64) -> Result<Graph
     Ok(graph)
 }
 
+use rand::{Rng, SeedableRng, rngs::StdRng};
+
+#[derive(Debug)]
+pub struct CommunityWorkload {
+    pub user_count: u64,
+    pub community_count: u64,
+    pub edges: Vec<(u64, u64)>,
+}
+
+pub fn generate_community_workload(
+    user_count: u64,
+    community_count: u64,
+    edges_per_user: u64,
+    local_edges_per_user: u64,
+    seed: u64,
+) -> Result<CommunityWorkload, String> {
+    if user_count == 0 {
+        return Err("User count must be greater than zero".to_string());
+    }
+
+    if community_count == 0 {
+        return Err("Community count must be greater than zero".to_string());
+    }
+
+    if user_count % community_count != 0 {
+        return Err("User count must divide evenly into communities".to_string());
+    }
+
+    if local_edges_per_user > edges_per_user {
+        return Err("Local edges cannot exceed total edges".to_string());
+    }
+
+    let community_size = user_count / community_count;
+
+    if local_edges_per_user >= community_size {
+        return Err("Too many local edges for the community size".to_string());
+    }
+
+    let cross_edges_per_user = edges_per_user - local_edges_per_user;
+
+    let users_outside_community = user_count - community_size;
+
+    if cross_edges_per_user > users_outside_community {
+        return Err("Too many cross-community edges requested".to_string());
+    }
+
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    let mut edges = Vec::with_capacity((user_count * edges_per_user) as usize);
+
+    for source in 1..=user_count {
+        let community_id = (source - 1) / community_size;
+
+        let community_start = community_id * community_size + 1;
+
+        let community_end = community_start + community_size - 1;
+
+        let mut targets = std::collections::HashSet::new();
+
+        while targets.len() < local_edges_per_user as usize {
+            let target = rng.gen_range(community_start..=community_end);
+
+            if target != source {
+                targets.insert(target);
+            }
+        }
+
+        while targets.len() < edges_per_user as usize {
+            let target = rng.gen_range(1..=user_count);
+
+            let target_community = (target - 1) / community_size;
+
+            if target != source && target_community != community_id {
+                targets.insert(target);
+            }
+        }
+
+        let mut ordered_targets: Vec<u64> = targets.into_iter().collect();
+
+        ordered_targets.sort_unstable();
+
+        for target in ordered_targets {
+            edges.push((source, target));
+        }
+    }
+
+    Ok(CommunityWorkload {
+        user_count,
+        community_count,
+        edges,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,5 +142,54 @@ mod tests {
     fn rejects_invalid_workloads() {
         assert!(build_uniform_graph(0, 0).is_err());
         assert!(build_uniform_graph(10, 10).is_err());
+    }
+}
+#[test]
+fn seeded_community_workload_is_repeatable() {
+    let first = generate_community_workload(100, 10, 8, 6, 42).unwrap();
+
+    let second = generate_community_workload(100, 10, 8, 6, 42).unwrap();
+
+    assert_eq!(first.edges, second.edges);
+}
+
+#[test]
+fn different_seeds_generate_different_edges() {
+    let first = generate_community_workload(100, 10, 8, 6, 42).unwrap();
+
+    let second = generate_community_workload(100, 10, 8, 6, 99).unwrap();
+
+    assert_ne!(first.edges, second.edges);
+}
+
+#[test]
+fn generates_requested_number_of_edges() {
+    let workload = generate_community_workload(100, 10, 8, 6, 42).unwrap();
+
+    assert_eq!(workload.edges.len(), 800);
+}
+
+#[test]
+fn generates_requested_local_edge_ratio() {
+    let workload = generate_community_workload(100, 10, 8, 6, 42).unwrap();
+
+    let community_size = 10;
+
+    for source in 1..=100 {
+        let source_community = (source - 1) / community_size;
+
+        let source_edges: Vec<_> = workload
+            .edges
+            .iter()
+            .filter(|(edge_source, _)| *edge_source == source)
+            .collect();
+
+        let local_count = source_edges
+            .iter()
+            .filter(|(_, target)| (*target - 1) / community_size == source_community)
+            .count();
+
+        assert_eq!(source_edges.len(), 8);
+        assert_eq!(local_count, 6);
     }
 }
