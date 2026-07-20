@@ -59,7 +59,9 @@ fn run_locality_sweep() -> Result<(), String> {
 
     csv_rows.push(
         "local_edges,hash_hops,community_hops,\
-         reduction_percent,community_shards"
+         reduction_percent,community_shards,\
+         direct_shard_requests,batched_shard_requests,\
+         request_reduction_percent"
             .replace(' ', ""),
     );
 
@@ -244,13 +246,13 @@ fn run_uneven_community_benchmark() -> Result<(), String> {
     let csv_rows = vec![
         "strategy,average_cross_shard_hops,\
          average_shards_touched,user_imbalance_percent,\
-         edge_imbalance_percent"
+         edge_imbalance_percent,direct_shard_requests,\
+         batched_shard_requests,request_reduction_percent"
             .replace(' ', ""),
         strategy_csv_row("hash", &hash_graph, &hash_stats),
         strategy_csv_row("naive_community", &naive_graph, &naive_stats),
         strategy_csv_row("balanced_community", &balanced_graph, &balanced_stats),
     ];
-
     write_csv("results/uneven_communities.csv", &csv_rows)?;
 
     println!(
@@ -403,12 +405,15 @@ fn strategy_csv_row(name: &str, graph: &ShardedGraph, stats: &AggregateStats) ->
     let edges = graph.edges_per_shard();
 
     format!(
-        "{},{:.2},{:.2},{:.2},{:.2}",
+        "{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}",
         name,
         stats.average_cross_shard_hops,
         stats.average_shards_touched,
         imbalance_percentage(&users),
-        imbalance_percentage(&edges)
+        imbalance_percentage(&edges),
+        stats.average_direct_shard_requests,
+        stats.average_batched_shard_requests,
+        stats.request_reduction_percent,
     )
 }
 
