@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::{Graph, User, balanced::assign_communities_balanced};
 
@@ -37,6 +37,7 @@ pub struct QueryResult {
     pub user_ids: Vec<u64>,
     pub shards_touched: usize,
     pub cross_shard_hops: usize,
+    pub shard_requests: usize,
 }
 
 pub struct ShardedGraph {
@@ -214,6 +215,7 @@ impl ShardedGraph {
                 user_ids: Vec::new(),
                 shards_touched: 0,
                 cross_shard_hops: 0,
+                shard_requests: 0,
             };
         };
 
@@ -221,6 +223,7 @@ impl ShardedGraph {
         let mut seen_users = HashSet::new();
         let mut touched_shards = HashSet::new();
         let mut cross_shard_hops = 0;
+        let mut shard_requests = 1;
 
         touched_shards.insert(source_shard);
 
@@ -234,6 +237,8 @@ impl ShardedGraph {
             if first_hop_shard != source_shard {
                 cross_shard_hops += 1;
             }
+
+            shard_requests += 1;
 
             for second_hop in self.get_following_ids(*first_hop) {
                 let Some(second_hop_shard) = self.try_shard_for(*second_hop) else {
@@ -256,6 +261,73 @@ impl ShardedGraph {
             user_ids,
             shards_touched: touched_shards.len(),
             cross_shard_hops,
+            shard_requests,
+        }
+    }
+
+    pub fn get_two_hop_batched_with_stats(&self, source: u64) -> QueryResult {
+        let Some(source_shard) = self.try_shard_for(source) else {
+            return QueryResult {
+                user_ids: Vec::new(),
+                shards_touched: 0,
+                cross_shard_hops: 0,
+                shard_requests: 0,
+            };
+        };
+
+        let mut user_ids = Vec::new();
+        let mut seen_users = HashSet::new();
+        let mut touched_shards = HashSet::new();
+        let mut cross_shard_hops = 0;
+
+        touched_shards.insert(source_shard);
+
+        let mut first_hops_by_shard: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
+
+        for first_hop in self.get_following_ids(source) {
+            let Some(first_hop_shard) = self.try_shard_for(*first_hop) else {
+                continue;
+            };
+
+            touched_shards.insert(first_hop_shard);
+
+            if first_hop_shard != source_shard {
+                cross_shard_hops += 1;
+            }
+
+            first_hops_by_shard
+                .entry(first_hop_shard)
+                .or_default()
+                .push(*first_hop);
+        }
+
+        let shard_requests = 1 + first_hops_by_shard.len();
+
+        for (first_hop_shard, first_hops) in first_hops_by_shard {
+            for first_hop in first_hops {
+                for second_hop in self.get_following_ids(first_hop) {
+                    let Some(second_hop_shard) = self.try_shard_for(*second_hop) else {
+                        continue;
+                    };
+
+                    touched_shards.insert(second_hop_shard);
+
+                    if second_hop_shard != first_hop_shard {
+                        cross_shard_hops += 1;
+                    }
+
+                    if *second_hop != source && seen_users.insert(*second_hop) {
+                        user_ids.push(*second_hop);
+                    }
+                }
+            }
+        }
+
+        QueryResult {
+            user_ids,
+            shards_touched: touched_shards.len(),
+            cross_shard_hops,
+            shard_requests,
         }
     }
 
@@ -394,5 +466,38 @@ mod tests {
         assert_eq!(result.user_ids, vec![3]);
         assert_eq!(result.shards_touched, 3);
         assert_eq!(result.cross_shard_hops, 2);
+        assert_eq!(result.shard_requests, 2);
+    }
+
+    #[test]
+    fn batches_first_hop_reads_by_shard() {
+        let mut graph = ShardedGraph::new(4).unwrap();
+
+        for id in [1, 2, 3, 6, 7] {
+            graph.add_user(id, &format!("user-{id}")).unwrap();
+        }
+
+        graph.add_follow(1, 2).unwrap();
+        graph.add_follow(1, 6).unwrap();
+        graph.add_follow(2, 3).unwrap();
+        graph.add_follow(6, 7).unwrap();
+
+        let direct = graph.get_two_hop_with_stats(1);
+        let batched = graph.get_two_hop_batched_with_stats(1);
+
+        let mut direct_ids = direct.user_ids;
+        let mut batched_ids = batched.user_ids;
+
+        direct_ids.sort_unstable();
+        batched_ids.sort_unstable();
+
+        assert_eq!(direct_ids, batched_ids);
+        assert_eq!(direct_ids, vec![3, 7]);
+
+        assert_eq!(direct.shard_requests, 3);
+        assert_eq!(batched.shard_requests, 2);
+
+        assert_eq!(direct.shards_touched, batched.shards_touched);
+        assert_eq!(direct.cross_shard_hops, batched.cross_shard_hops);
     }
 }
