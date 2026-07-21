@@ -101,6 +101,49 @@ def generate_batching_chart() -> None:
     print(f"Created {output_path}")
 
 
+def generate_batching_by_shards_chart() -> None:
+    rows = read_csv(RESULTS_DIR / "batching_sweep.csv")
+
+    series: dict[int, list[tuple[int, float]]] = {}
+
+    for row in rows:
+        local_edges = int(row["local_edges_per_user"])
+        shard_count = int(row["shard_count"])
+        reduction = float(row["request_reduction_percent"])
+
+        series.setdefault(local_edges, []).append((shard_count, reduction))
+
+    plt.figure(figsize=(9, 5.5))
+
+    for local_edges in sorted(series.keys()):
+        points = sorted(series[local_edges])
+        shard_counts = [shard_count for shard_count, _ in points]
+        reductions = [reduction for _, reduction in points]
+
+        plt.plot(
+            shard_counts,
+            reductions,
+            marker="o",
+            label=f"{local_edges} local edges",
+        )
+
+    plt.title("Batching Benefit vs Shard Count")
+    plt.xlabel("Shard count")
+    plt.ylabel("Logical shard-request reduction (%)")
+
+    plt.xticks(sorted({int(row["shard_count"]) for row in rows}))
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+
+    output_path = IMAGES_DIR / "batching_by_shards.svg"
+
+    plt.savefig(output_path, format="svg")
+    plt.close()
+
+    print(f"Created {output_path}")
+
+
 def generate_tradeoff_chart() -> None:
     rows = read_csv(RESULTS_DIR / "uneven_communities.csv")
 
@@ -169,6 +212,7 @@ def main() -> None:
 
     generate_locality_chart()
     generate_batching_chart()
+    generate_batching_by_shards_chart()
     generate_tradeoff_chart()
 
 
