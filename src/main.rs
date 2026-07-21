@@ -8,7 +8,9 @@ use graph_shard_lab::{
     cache::LruCache,
     sharded::{Placement, QueryResult, ShardedGraph},
     uneven::generate_uneven_community_workload,
-    workload::{CommunityWorkload, generate_community_workload, generate_hub_workload},
+    workload::{
+        CommunityWorkload, HubWorkload, generate_community_workload, generate_hub_workload,
+    },
 };
 
 const USER_COUNT: u64 = 10_000;
@@ -31,6 +33,7 @@ const HUB_COUNT: u64 = 100;
 const HUB_EDGES_PER_USER: u64 = 2;
 const CACHE_CAPACITIES: [usize; 6] = [25, 50, 100, 250, 500, 1_000];
 const CACHE_STARTUP_WINDOW: usize = 1000;
+const REAL_CACHE_CAPACITIES_PER_SHARD: [usize; 4] = [25, 50, 100, 250];
 
 fn main() -> Result<(), String> {
     run_locality_sweep()?;
@@ -39,6 +42,7 @@ fn main() -> Result<(), String> {
     run_hub_hotspot_baseline()?;
     run_hotspot_cache_baseline()?;
     run_hotspot_cache_warming_benchmark()?;
+    run_real_sharded_cache_benchmark()?;
 
     Ok(())
 }
@@ -762,6 +766,142 @@ fn run_hotspot_cache_warming_benchmark() -> Result<(), String> {
     write_csv("results/cache_warming.csv", &csv_rows)?;
 
     println!("\nSaved results to results/cache_warming.csv");
+
+    Ok(())
+}
+
+fn build_hub_reference_graph(workload: &HubWorkload) -> Result<Graph, String> {
+    let mut graph = Graph::new();
+
+    for id in 1..=workload.user_count {
+        graph.add_user(id, &format!("user-{id}"))?;
+    }
+
+    for &(source, target) in &workload.edges {
+        graph.add_follow(source, target)?;
+    }
+
+    Ok(graph)
+}
+
+fn build_cached_hub_sharded_graph(
+    workload: &HubWorkload,
+    cache_capacity_per_shard: usize,
+) -> Result<ShardedGraph, String> {
+    let mut graph = ShardedGraph::with_placement_and_cache(
+        SHARD_COUNT,
+        Placement::Hash,
+        cache_capacity_per_shard,
+    )?;
+
+    for id in 1..=workload.user_count {
+        graph.add_user(id, &format!("user-{id}"))?;
+    }
+
+    for &(source, target) in &workload.edges {
+        graph.add_follow(source, target)?;
+    }
+
+    Ok(graph)
+}
+
+fn run_real_sharded_cache_benchmark() -> Result<(), String> {
+    let workload = generate_hub_workload(
+        USER_COUNT,
+        HUB_COUNT,
+        EDGES_PER_USER,
+        HUB_EDGES_PER_USER,
+        SEED,
+    )?;
+
+    let reference = build_hub_reference_graph(&workload)?;
+
+    println!(
+        "\nReal per-shard adjacency cache benchmark\n\
+         Shards: {SHARD_COUNT}\n\
+         Queries: {}\n\
+         Each shard owns an independent cache\n",
+        workload.user_count,
+    );
+
+    println!(
+        "{:<14} {:<14} {:<12} {:<12} {:<12}",
+        "Per shard", "Total capacity", "Hits", "Misses", "Hit rate",
+    );
+
+    println!("{}", "-".repeat(70));
+
+    let mut csv_rows = vec![
+        "cache_capacity_per_shard,total_cache_capacity,\
+         total_queries,total_accesses,cache_hits,cache_misses,\
+         hit_rate_percent"
+            .replace(' ', ""),
+    ];
+
+    for capacity_per_shard in REAL_CACHE_CAPACITIES_PER_SHARD {
+        let mut sharded = build_cached_hub_sharded_graph(&workload, capacity_per_shard)?;
+
+        let mut total_hits = 0_usize;
+        let mut total_misses = 0_usize;
+
+        for source in 1..=workload.user_count {
+            let mut expected = reference.get_two_hop_ids(source);
+
+            let cached = sharded.get_two_hop_with_cache_stats(source)?;
+
+            let mut actual = cached.user_ids;
+
+            expected.sort_unstable();
+            actual.sort_unstable();
+
+            if actual != expected {
+                return Err(format!(
+                    "Cached query returned incorrect users for source {source}"
+                ));
+            }
+
+            total_hits += cached.cache_hits;
+            total_misses += cached.cache_misses;
+        }
+
+        let total_accesses = total_hits + total_misses;
+
+        let expected_accesses = workload.edges.len();
+
+        if total_accesses != expected_accesses {
+            return Err(format!(
+                "Expected {expected_accesses} cache accesses, \
+                 but recorded {total_accesses}"
+            ));
+        }
+
+        let hit_rate = percentage(total_hits as u64, total_accesses as u64);
+
+        let total_capacity = capacity_per_shard * SHARD_COUNT;
+
+        println!(
+            "{:<14} {:<14} {:<12} {:<12} {:>10.2}%",
+            capacity_per_shard, total_capacity, total_hits, total_misses, hit_rate,
+        );
+
+        csv_rows.push(format!(
+            "{},{},{},{},{},{},{:.2}",
+            capacity_per_shard,
+            total_capacity,
+            workload.user_count,
+            total_accesses,
+            total_hits,
+            total_misses,
+            hit_rate,
+        ));
+    }
+
+    write_csv("results/real_sharded_cache.csv", &csv_rows)?;
+
+    println!(
+        "\nSaved results to \
+         results/real_sharded_cache.csv"
+    );
 
     Ok(())
 }

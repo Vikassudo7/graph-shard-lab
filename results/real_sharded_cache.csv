@@ -1,0 +1,5 @@
+cache_capacity_per_shard,total_cache_capacity,total_queries,total_accesses,cache_hits,cache_misses,hit_rate_percent
+25,100,10000,80000,4935,75065,6.17
+50,200,10000,80000,9300,70700,11.62
+100,400,10000,80000,15561,64439,19.45
+250,1000,10000,80000,24560,55440,30.70
