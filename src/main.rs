@@ -16,6 +16,11 @@ const EDGES_PER_USER: u64 = 8;
 const SHARD_COUNT: usize = 4;
 const SEED: u64 = 42;
 
+const SWEEP_SEEDS: [u64; 5] = [42, 43, 44, 45, 46];
+const SWEEP_SHARD_COUNTS: [usize; 4] = [2, 4, 8, 16];
+const SWEEP_COMMUNITY_COUNT: u64 = 16;
+const SWEEP_LOCAL_EDGE_COUNTS: [u64; 2] = [4, 7];
+
 const LOCAL_EDGE_COUNTS: [u64; 6] = [0, 2, 4, 6, 7, 8];
 
 const UNEVEN_COMMUNITY_SIZES: [u64; 5] = [4_000, 2_500, 1_500, 1_000, 1_000];
@@ -25,6 +30,7 @@ const UNEVEN_LOCAL_EDGES: u64 = 7;
 fn main() -> Result<(), String> {
     run_locality_sweep()?;
     run_uneven_community_benchmark()?;
+    run_multi_seed_shard_sweep()?;
 
     Ok(())
 }
@@ -270,6 +276,95 @@ struct AggregateStats {
     average_batched_shard_requests: f64,
     request_reduction_percent: f64,
 }
+fn run_multi_seed_shard_sweep() -> Result<(), String> {
+    let community_size = USER_COUNT / SWEEP_COMMUNITY_COUNT;
+
+    println!(
+        "\nMulti-seed and multi-shard batching sweep\n\
+         Users: {USER_COUNT}\n\
+         Communities: {SWEEP_COMMUNITY_COUNT}\n\
+         Edges per user: {EDGES_PER_USER}\n\
+         Seeds: {SWEEP_SEEDS:?}\n"
+    );
+
+    println!(
+        "{:<12} {:<10} {:<10} {:<16} {:<17} {:<15}",
+        "Local edges", "Shards", "Seeds", "Direct requests", "Batched requests", "Reduction",
+    );
+
+    println!("{}", "-".repeat(86));
+
+    let mut csv_rows = vec![
+        "local_edges_per_user,shard_count,seed_count,\
+         average_direct_shard_requests,average_batched_shard_requests,\
+         request_reduction_percent"
+            .replace(' ', ""),
+    ];
+
+    for local_edges_per_user in SWEEP_LOCAL_EDGE_COUNTS {
+        for shard_count in SWEEP_SHARD_COUNTS {
+            let mut total_direct_requests = 0.0;
+            let mut total_batched_requests = 0.0;
+
+            for seed in SWEEP_SEEDS {
+                let workload = generate_community_workload(
+                    USER_COUNT,
+                    SWEEP_COMMUNITY_COUNT,
+                    EDGES_PER_USER,
+                    local_edges_per_user,
+                    seed,
+                )?;
+
+                let reference = build_reference_graph(&workload)?;
+
+                let sharded = build_sharded_graph_with_shard_count(
+                    &workload,
+                    Placement::Community { community_size },
+                    shard_count,
+                )?;
+
+                let stats = validate_and_measure(&reference, &sharded, workload.user_count)?;
+
+                total_direct_requests += stats.average_direct_shard_requests;
+                total_batched_requests += stats.average_batched_shard_requests;
+            }
+
+            let seed_count = SWEEP_SEEDS.len() as f64;
+
+            let average_direct_requests = total_direct_requests / seed_count;
+
+            let average_batched_requests = total_batched_requests / seed_count;
+
+            let reduction = percentage_reduction(average_direct_requests, average_batched_requests);
+
+            println!(
+                "{:<12} {:<10} {:<10} {:<16.2} {:<17.2} {:>13.2}%",
+                local_edges_per_user,
+                shard_count,
+                SWEEP_SEEDS.len(),
+                average_direct_requests,
+                average_batched_requests,
+                reduction,
+            );
+
+            csv_rows.push(format!(
+                "{},{},{},{:.2},{:.2},{:.2}",
+                local_edges_per_user,
+                shard_count,
+                SWEEP_SEEDS.len(),
+                average_direct_requests,
+                average_batched_requests,
+                reduction,
+            ));
+        }
+    }
+
+    write_csv("results/batching_sweep.csv", &csv_rows)?;
+
+    println!("\nSaved results to results/batching_sweep.csv");
+
+    Ok(())
+}
 
 fn build_reference_graph(workload: &CommunityWorkload) -> Result<Graph, String> {
     let mut graph = Graph::new();
@@ -289,7 +384,15 @@ fn build_sharded_graph(
     workload: &CommunityWorkload,
     placement: Placement,
 ) -> Result<ShardedGraph, String> {
-    let mut graph = ShardedGraph::with_placement(SHARD_COUNT, placement)?;
+    build_sharded_graph_with_shard_count(workload, placement, SHARD_COUNT)
+}
+
+fn build_sharded_graph_with_shard_count(
+    workload: &CommunityWorkload,
+    placement: Placement,
+    shard_count: usize,
+) -> Result<ShardedGraph, String> {
+    let mut graph = ShardedGraph::with_placement(shard_count, placement)?;
 
     populate_sharded_graph(&mut graph, workload)?;
 
