@@ -71,19 +71,19 @@ Both execution methods returned exactly the same query results.
 
 These are logical request counts inside an in-process prototype, not real network requests or measured latency.
 
-### Uneven communities create a balance trade-off
+## Uneven communities create a balance trade-off
 
 The uneven-community workload uses these community sizes:
 
-''' text
+```text
 [4000, 2500, 1500, 1000, 1000]
 ```
 
-| Placement | Users per shard | Maximum imbalance | Average hops | Batched request reduction |
-|---|---|---:|---:|---:|
-| Hash | `[2500, 2500, 2500, 2500]` | 0% | 53.97 | 48.84% |
-| Naive community | `[5000, 2500, 1500, 1000]` | 100% | 8.02 | 67.91% |
-| Balanced community | `[4000, 2500, 1500, 2000]` | 60% | 8.79 | 66.93% |
+| Placement           | Users per shard              | Max imbalance | Avg hops | Batched request reduction |
+|----------------------|-------------------------------|---------------:|----------:|---------------------------:|
+| Hash                 | `[2500, 2500, 2500, 2500]`    | 0%             | 53.97     | 48.84%                     |
+| Naive community      | `[5000, 2500, 1500, 1000]`    | 100%           | 8.02      | 67.91%                     |
+| Balanced community   | `[4000, 2500, 1500, 2000]`    | 60%            | 8.79      | 66.93%                     |
 
 Hash placement gives perfect balance but poor graph locality.
 
