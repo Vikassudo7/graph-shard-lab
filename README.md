@@ -545,33 +545,25 @@ graph-shard-lab/
 
 GraphShard Lab is a research prototype, not a production distributed database.
 
-- All shards run inside one process.
+- All shards and shard-local caches run inside one process.
 - Data is stored only in memory.
 - Cross-shard hops are logical measurements.
 - Shard requests are logical request counts.
 - No real network communication occurs.
-- Real latency and throughput are not measured.
+- Real latency, throughput, and hardware-level cache behavior are not measured.
 - Community membership is provided in advance.
 - Oversized communities are not split.
 - Nodes are not replicated.
 - Data is not persisted to disk.
 - There is no failover or replication protocol.
 - Workloads are synthetic.
-- The LRU cache currently stores user IDs representing cached adjacency lists, not the adjacency-list data itself.
-- Cache accesses are replayed from the generated edge stream rather than integrated into real shard execution.
-- The current cache is one logical simulator, not one independent cache per shard.
-- Cache hits represent avoided logical graph lookups, not measured memory, disk, or network savings.
-- Cache warming uses complete workload degree information, which is an idealized assumption.
-- Shards and shard-local caches still run inside one process.
 - Cache capacity counts adjacency lists rather than actual memory bytes.
 - Cached adjacency lists are cloned when returned.
-- Cache invalidation for graph updates is not implemented.
-- Cache-hit improvements are not measured as real latency improvements.
+- Cache invalidation after graph updates is not implemented.
+- Cache warming uses complete workload degree information, which is an idealized assumption.
+- A cache hit represents an in-memory adjacency-list reuse, not a measured disk, network, or latency improvement.
 
-
-Therefore:
-
-> Fewer logical shard requests does not automatically mean the query is equally faster in a real distributed system.
+The project also retains an earlier ID-only LRU simulator for comparison, but real sharded two-hop queries use independent shard-local caches containing actual adjacency-list data.
 
 ## Future work
 
