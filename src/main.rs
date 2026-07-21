@@ -7,7 +7,7 @@ use graph_shard_lab::{
     Graph,
     sharded::{Placement, QueryResult, ShardedGraph},
     uneven::generate_uneven_community_workload,
-    workload::{CommunityWorkload, generate_community_workload},
+    workload::{CommunityWorkload, generate_community_workload, generate_hub_workload},
 };
 
 const USER_COUNT: u64 = 10_000;
@@ -26,11 +26,14 @@ const LOCAL_EDGE_COUNTS: [u64; 6] = [0, 2, 4, 6, 7, 8];
 const UNEVEN_COMMUNITY_SIZES: [u64; 5] = [4_000, 2_500, 1_500, 1_000, 1_000];
 
 const UNEVEN_LOCAL_EDGES: u64 = 7;
+const HUB_COUNT: u64 = 100;
+const HUB_EDGES_PER_USER: u64 = 2;
 
 fn main() -> Result<(), String> {
     run_locality_sweep()?;
     run_uneven_community_benchmark()?;
     run_multi_seed_shard_sweep()?;
+    run_hub_hotspot_baseline()?;
 
     Ok(())
 }
@@ -362,6 +365,121 @@ fn run_multi_seed_shard_sweep() -> Result<(), String> {
     write_csv("results/batching_sweep.csv", &csv_rows)?;
 
     println!("\nSaved results to results/batching_sweep.csv");
+
+    Ok(())
+}
+
+fn run_hub_hotspot_baseline() -> Result<(), String> {
+    let workload = generate_hub_workload(
+        USER_COUNT,
+        HUB_COUNT,
+        EDGES_PER_USER,
+        HUB_EDGES_PER_USER,
+        SEED,
+    )?;
+
+    // Index 0 is unused because user IDs begin at 1.
+    let mut adjacency_reads = vec![0_u64; (workload.user_count + 1) as usize];
+
+    /*
+    Every edge source -> target means that target appears as a
+    first-hop user when querying source.
+
+    The two-hop query must then read target's adjacency list.
+    */
+    for &(_, target) in &workload.edges {
+        adjacency_reads[target as usize] += 1;
+    }
+
+    let total_reads = workload.edges.len() as u64;
+
+    let hub_reads: u64 = workload
+        .hub_ids
+        .iter()
+        .map(|&hub_id| adjacency_reads[hub_id as usize])
+        .sum();
+
+    let normal_reads = total_reads - hub_reads;
+
+    let hub_user_count = workload.hub_ids.len() as u64;
+    let normal_user_count = workload.user_count - hub_user_count;
+
+    let hub_read_share = hub_reads as f64 / total_reads as f64 * 100.0;
+
+    let average_hub_reads = hub_reads as f64 / hub_user_count as f64;
+
+    let average_normal_reads = normal_reads as f64 / normal_user_count as f64;
+
+    let hotspot_multiplier = if average_normal_reads == 0.0 {
+        0.0
+    } else {
+        average_hub_reads / average_normal_reads
+    };
+
+    let mut ranked_users: Vec<(u64, u64)> = (1..=workload.user_count)
+        .map(|user_id| (user_id, adjacency_reads[user_id as usize]))
+        .collect();
+
+    ranked_users.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+
+    println!(
+        "\nHub-heavy hotspot baseline\n\
+         Users: {USER_COUNT}\n\
+         Hubs: {HUB_COUNT}\n\
+         Edges per user: {EDGES_PER_USER}\n\
+         Hub edges per user: {HUB_EDGES_PER_USER}\n\
+         Seed: {SEED}\n"
+    );
+
+    println!("Total adjacency reads: {total_reads}");
+    println!("Reads targeting hubs: {hub_reads}");
+    println!("Hub share of reads: {hub_read_share:.2}%");
+    println!("Average reads per hub: {average_hub_reads:.2}");
+    println!(
+        "Average reads per normal user: \
+         {average_normal_reads:.2}"
+    );
+    println!(
+        "Average hub-to-normal read multiplier: \
+         {hotspot_multiplier:.2}x"
+    );
+
+    println!("\nTop 10 most-read adjacency lists:");
+
+    println!(
+        "{:<6} {:<10} {:<10} {:<10}",
+        "Rank", "User", "Type", "Reads",
+    );
+
+    println!("{}", "-".repeat(40));
+
+    for (index, &(user_id, reads)) in ranked_users.iter().take(10).enumerate() {
+        let user_type = if user_id <= HUB_COUNT {
+            "hub"
+        } else {
+            "normal"
+        };
+
+        println!(
+            "{:<6} {:<10} {:<10} {:<10}",
+            index + 1,
+            user_id,
+            user_type,
+            reads,
+        );
+    }
+
+    let mut csv_rows = vec!["user_id,is_hub,adjacency_reads".to_string()];
+
+    for (user_id, reads) in ranked_users {
+        let is_hub = user_id <= HUB_COUNT;
+
+        csv_rows.push(format!("{user_id},{is_hub},{reads}"));
+    }
+
+    write_csv("results/hub_hotspot.csv", &csv_rows)?;
+
+    println!("\nSaved results to results/hub_hotspot.csv");
 
     Ok(())
 }

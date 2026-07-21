@@ -34,6 +34,13 @@ pub struct CommunityWorkload {
     pub edges: Vec<(u64, u64)>,
 }
 
+#[derive(Debug)]
+pub struct HubWorkload {
+    pub user_count: u64,
+    pub hub_ids: Vec<u64>,
+    pub edges: Vec<(u64, u64)>,
+}
+
 pub fn generate_community_workload(
     user_count: u64,
     community_count: u64,
@@ -117,6 +124,90 @@ pub fn generate_community_workload(
         edges,
     })
 }
+pub fn generate_hub_workload(
+    user_count: u64,
+    hub_count: u64,
+    edges_per_user: u64,
+    hub_edges_per_user: u64,
+    seed: u64,
+) -> Result<HubWorkload, String> {
+    if user_count == 0 {
+        return Err("User count must be greater than zero".to_string());
+    }
+
+    if hub_count == 0 {
+        return Err("Hub count must be greater than zero".to_string());
+    }
+
+    if hub_count >= user_count {
+        return Err("Hub count must be smaller than user count".to_string());
+    }
+
+    if edges_per_user >= user_count {
+        return Err("Edges per user must be smaller than user count".to_string());
+    }
+
+    if hub_edges_per_user > edges_per_user {
+        return Err("Hub edges cannot exceed total edges".to_string());
+    }
+
+    // Hub users cannot follow themselves, so a hub has only
+    // hub_count - 1 possible hub targets.
+    if hub_edges_per_user >= hub_count {
+        return Err("Too many hub edges requested".to_string());
+    }
+
+    let regular_edges_per_user = edges_per_user - hub_edges_per_user;
+    let regular_user_count = user_count - hub_count;
+
+    // A normal user cannot follow itself, so it has at most
+    // regular_user_count - 1 distinct normal targets.
+    if regular_edges_per_user >= regular_user_count {
+        return Err("Too many regular edges requested".to_string());
+    }
+
+    let hub_ids: Vec<u64> = (1..=hub_count).collect();
+
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    let mut edges = Vec::with_capacity((user_count * edges_per_user) as usize);
+
+    for source in 1..=user_count {
+        let mut targets = std::collections::HashSet::new();
+
+        // Select the requested number of popular hub targets.
+        while targets.len() < hub_edges_per_user as usize {
+            let target = rng.gen_range(1..=hub_count);
+
+            if target != source {
+                targets.insert(target);
+            }
+        }
+
+        // Fill the remaining edges using normal, non-hub users.
+        while targets.len() < edges_per_user as usize {
+            let target = rng.gen_range((hub_count + 1)..=user_count);
+
+            if target != source {
+                targets.insert(target);
+            }
+        }
+
+        let mut ordered_targets: Vec<u64> = targets.into_iter().collect();
+
+        ordered_targets.sort_unstable();
+
+        for target in ordered_targets {
+            edges.push((source, target));
+        }
+    }
+
+    Ok(HubWorkload {
+        user_count,
+        hub_ids,
+        edges,
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -192,4 +283,47 @@ fn generates_requested_local_edge_ratio() {
         assert_eq!(source_edges.len(), 8);
         assert_eq!(local_count, 6);
     }
+}
+
+#[test]
+fn seeded_hub_workload_is_repeatable() {
+    let first = generate_hub_workload(100, 5, 8, 2, 42).unwrap();
+
+    let second = generate_hub_workload(100, 5, 8, 2, 42).unwrap();
+
+    assert_eq!(first.edges, second.edges);
+    assert_eq!(first.hub_ids, second.hub_ids);
+}
+
+#[test]
+fn hub_workload_generates_requested_edges() {
+    let workload = generate_hub_workload(100, 5, 8, 2, 42).unwrap();
+
+    assert_eq!(workload.user_count, 100);
+    assert_eq!(workload.hub_ids, vec![1, 2, 3, 4, 5]);
+    assert_eq!(workload.edges.len(), 800);
+
+    for source in 1..=100 {
+        let source_edges: Vec<_> = workload
+            .edges
+            .iter()
+            .filter(|(edge_source, _)| *edge_source == source)
+            .collect();
+
+        let hub_target_count = source_edges
+            .iter()
+            .filter(|(_, target)| *target <= 5)
+            .count();
+
+        assert_eq!(source_edges.len(), 8);
+        assert_eq!(hub_target_count, 2);
+    }
+}
+
+#[test]
+fn hub_workload_rejects_invalid_parameters() {
+    assert!(generate_hub_workload(0, 5, 8, 2, 42).is_err());
+    assert!(generate_hub_workload(100, 0, 8, 2, 42).is_err());
+    assert!(generate_hub_workload(100, 100, 8, 2, 42).is_err());
+    assert!(generate_hub_workload(100, 5, 8, 9, 42).is_err());
 }
