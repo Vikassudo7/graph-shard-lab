@@ -40,7 +40,7 @@ Community placement produced **86.19% fewer logical cross-shard hops** than hash
 
 ### Batching reduces logical shard requests
 
-The project also compares two ways of executing the same two-hop query.
+The project compares two ways of executing the same two-hop query.
 
 **Direct execution**
 
@@ -63,11 +63,36 @@ Shard 2: read user C
 
 Direct execution used `9.00` logical shard requests per query.
 
-Across the locality sweep, batched execution used between `2.00` and `4.52` requests, reducing logical shard requests by **49.74% to 77.78%**.
+In the original locality sweep, batched execution used between `2.00` and `4.52` requests, reducing logical shard requests by **49.74% to 77.78%**.
 
 Both execution methods returned exactly the same query results.
 
 ![Direct versus batched shard requests](docs/images/batching_requests.svg)
+
+### Batching across multiple seeds and shard counts
+
+To make the batching result more trustworthy, GraphShard Lab also runs a second sweep across:
+
+- **5 random seeds**: `42, 43, 44, 45, 46`
+- **4 shard counts**: `2, 4, 8, 16`
+- **2 locality levels**:
+  - `4` local edges per user
+  - `7` local edges per user
+
+This produces `5 × 4 × 2 = 40` benchmark settings.
+
+Key result:
+
+- Under **moderate locality** (`4` local edges), batching reduced logical shard requests by **37.61% to 67.19%**.
+- Under **strong locality** (`7` local edges), batching reduced logical shard requests by **66.67% to 71.87%**.
+
+This shows:
+
+- batching stays effective across different generated graphs;
+- batching helps less as shard count increases when connected users are more spread out;
+- batching remains highly effective when community locality is strong.
+
+![Batching benefit versus shard count](docs/images/batching_by_shards.svg)
 
 These are logical request counts inside an in-process prototype, not real network requests or measured latency.
 
@@ -290,6 +315,24 @@ The same generated edge list is supplied to every placement strategy, ensuring a
 
 Using the same seed and parameters produces the same graph.
 
+Current benchmark families:
+
+1. **Locality sweep**  
+   Equal-sized communities with different levels of locality (`0, 2, 4, 6, 7, 8` local edges per user).
+
+2. **Uneven-community workload**  
+   Uneven community sizes:
+
+   ```text
+   [4000, 2500, 1500, 1000, 1000]
+   ```
+
+3. **Multi-seed, multi-shard batching sweep**  
+   Community workload tested across:
+   - seeds `42, 43, 44, 45, 46`
+   - shard counts `2, 4, 8, 16`
+   - locality levels `4` and `7`
+
 ## Run the project
 
 ### Requirements
@@ -329,6 +372,7 @@ Benchmark CSV files:
 ```text
 results/locality_sweep.csv
 results/uneven_communities.csv
+results/batching_sweep.csv
 ```
 
 Generated charts:
@@ -336,10 +380,9 @@ Generated charts:
 ```text
 docs/images/locality_sweep.svg
 docs/images/batching_requests.svg
+docs/images/batching_by_shards.svg
 docs/images/uneven_tradeoff.svg
 ```
-
-## Project structure
 
 ```text
 graph-shard-lab/
@@ -354,13 +397,15 @@ graph-shard-lab/
 │   └── tiny_graph.rs
 ├── results/
 │   ├── locality_sweep.csv
-│   └── uneven_communities.csv
+│   ├── uneven_communities.csv
+│   └── batching_sweep.csv
 ├── scripts/
 │   └── generate_charts.py
 ├── docs/
 │   └── images/
 │       ├── locality_sweep.svg
 │       ├── batching_requests.svg
+│       ├── batching_by_shards.svg
 │       └── uneven_tradeoff.svg
 ├── DESIGN.md
 ├── Cargo.toml
@@ -392,8 +437,6 @@ Therefore:
 
 Possible extensions include:
 
-- multiple random seeds;
-- different shard counts;
 - hotspot and hub-heavy workloads;
 - cache warming experiments;
 - bounded memory caches;
