@@ -231,7 +231,7 @@ These measurements show cache reuse, not query-speed improvement. The shards and
 Users are graph nodes.
 
 A directed `FOLLOWS` relationship is an edge:
-
+   
 ```text
 Alice → Bob
 Bob → Charlie
