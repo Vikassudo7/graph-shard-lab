@@ -5,9 +5,10 @@ use std::{
 
 use graph_shard_lab::{
     Graph,
+    cache::LruCache,
     sharded::{Placement, QueryResult, ShardedGraph},
     uneven::generate_uneven_community_workload,
-    workload::{CommunityWorkload, generate_community_workload},
+    workload::{CommunityWorkload, generate_community_workload, generate_hub_workload},
 };
 
 const USER_COUNT: u64 = 10_000;
@@ -26,11 +27,18 @@ const LOCAL_EDGE_COUNTS: [u64; 6] = [0, 2, 4, 6, 7, 8];
 const UNEVEN_COMMUNITY_SIZES: [u64; 5] = [4_000, 2_500, 1_500, 1_000, 1_000];
 
 const UNEVEN_LOCAL_EDGES: u64 = 7;
+const HUB_COUNT: u64 = 100;
+const HUB_EDGES_PER_USER: u64 = 2;
+const CACHE_CAPACITIES: [usize; 6] = [25, 50, 100, 250, 500, 1_000];
+const CACHE_STARTUP_WINDOW: usize = 1000;
 
 fn main() -> Result<(), String> {
     run_locality_sweep()?;
     run_uneven_community_benchmark()?;
     run_multi_seed_shard_sweep()?;
+    run_hub_hotspot_baseline()?;
+    run_hotspot_cache_baseline()?;
+    run_hotspot_cache_warming_benchmark()?;
 
     Ok(())
 }
@@ -268,6 +276,13 @@ fn run_uneven_community_benchmark() -> Result<(), String> {
 
     Ok(())
 }
+#[derive(Debug)]
+struct CacheRunStats {
+    hits: u64,
+    misses: u64,
+    startup_hits: u64,
+    startup_accesses: u64,
+}
 
 struct AggregateStats {
     average_shards_touched: f64,
@@ -362,6 +377,391 @@ fn run_multi_seed_shard_sweep() -> Result<(), String> {
     write_csv("results/batching_sweep.csv", &csv_rows)?;
 
     println!("\nSaved results to results/batching_sweep.csv");
+
+    Ok(())
+}
+
+fn run_hub_hotspot_baseline() -> Result<(), String> {
+    let workload = generate_hub_workload(
+        USER_COUNT,
+        HUB_COUNT,
+        EDGES_PER_USER,
+        HUB_EDGES_PER_USER,
+        SEED,
+    )?;
+
+    // Index 0 is unused because user IDs begin at 1.
+    let mut adjacency_reads = vec![0_u64; (workload.user_count + 1) as usize];
+
+    /*
+    Every edge source -> target means that target appears as a
+    first-hop user when querying source.
+
+    The two-hop query must then read target's adjacency list.
+    */
+    for &(_, target) in &workload.edges {
+        adjacency_reads[target as usize] += 1;
+    }
+
+    let total_reads = workload.edges.len() as u64;
+
+    let hub_reads: u64 = workload
+        .hub_ids
+        .iter()
+        .map(|&hub_id| adjacency_reads[hub_id as usize])
+        .sum();
+
+    let normal_reads = total_reads - hub_reads;
+
+    let hub_user_count = workload.hub_ids.len() as u64;
+    let normal_user_count = workload.user_count - hub_user_count;
+
+    let hub_read_share = hub_reads as f64 / total_reads as f64 * 100.0;
+
+    let average_hub_reads = hub_reads as f64 / hub_user_count as f64;
+
+    let average_normal_reads = normal_reads as f64 / normal_user_count as f64;
+
+    let hotspot_multiplier = if average_normal_reads == 0.0 {
+        0.0
+    } else {
+        average_hub_reads / average_normal_reads
+    };
+
+    let mut ranked_users: Vec<(u64, u64)> = (1..=workload.user_count)
+        .map(|user_id| (user_id, adjacency_reads[user_id as usize]))
+        .collect();
+
+    ranked_users.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+
+    println!(
+        "\nHub-heavy hotspot baseline\n\
+         Users: {USER_COUNT}\n\
+         Hubs: {HUB_COUNT}\n\
+         Edges per user: {EDGES_PER_USER}\n\
+         Hub edges per user: {HUB_EDGES_PER_USER}\n\
+         Seed: {SEED}\n"
+    );
+
+    println!("Total adjacency reads: {total_reads}");
+    println!("Reads targeting hubs: {hub_reads}");
+    println!("Hub share of reads: {hub_read_share:.2}%");
+    println!("Average reads per hub: {average_hub_reads:.2}");
+    println!(
+        "Average reads per normal user: \
+         {average_normal_reads:.2}"
+    );
+    println!(
+        "Average hub-to-normal read multiplier: \
+         {hotspot_multiplier:.2}x"
+    );
+
+    println!("\nTop 10 most-read adjacency lists:");
+
+    println!(
+        "{:<6} {:<10} {:<10} {:<10}",
+        "Rank", "User", "Type", "Reads",
+    );
+
+    println!("{}", "-".repeat(40));
+
+    for (index, &(user_id, reads)) in ranked_users.iter().take(10).enumerate() {
+        let user_type = if user_id <= HUB_COUNT {
+            "hub"
+        } else {
+            "normal"
+        };
+
+        println!(
+            "{:<6} {:<10} {:<10} {:<10}",
+            index + 1,
+            user_id,
+            user_type,
+            reads,
+        );
+    }
+
+    let mut csv_rows = vec!["user_id,is_hub,adjacency_reads".to_string()];
+
+    for (user_id, reads) in ranked_users {
+        let is_hub = user_id <= HUB_COUNT;
+
+        csv_rows.push(format!("{user_id},{is_hub},{reads}"));
+    }
+
+    write_csv("results/hub_hotspot.csv", &csv_rows)?;
+
+    println!("\nSaved results to results/hub_hotspot.csv");
+
+    Ok(())
+}
+fn run_hotspot_cache_baseline() -> Result<(), String> {
+    let workload = generate_hub_workload(
+        USER_COUNT,
+        HUB_COUNT,
+        EDGES_PER_USER,
+        HUB_EDGES_PER_USER,
+        SEED,
+    )?;
+
+    println!(
+        "\nCold LRU cache on hub-heavy workload\n\
+         Total logical adjacency reads: {}\n\
+         Cache starts empty\n",
+        workload.edges.len(),
+    );
+
+    println!(
+        "{:<10} {:<10} {:<10} {:<12} {:<12} {:<12}",
+        "Capacity", "Hits", "Misses", "Hit rate", "Hub rate", "Normal rate",
+    );
+
+    println!("{}", "-".repeat(72));
+
+    let mut csv_rows = vec![
+        "capacity,total_accesses,hits,misses,hit_rate_percent,\
+         hub_hit_rate_percent,normal_hit_rate_percent,\
+         main_graph_reads_avoided"
+            .replace(' ', ""),
+    ];
+
+    for capacity in CACHE_CAPACITIES {
+        let mut cache = LruCache::new(capacity)?;
+
+        let mut hits = 0_u64;
+        let mut misses = 0_u64;
+
+        let mut hub_hits = 0_u64;
+        let mut hub_misses = 0_u64;
+
+        let mut normal_hits = 0_u64;
+        let mut normal_misses = 0_u64;
+
+        /*
+        The edge order represents running one query from each source.
+
+        For every source -> target edge, the two-hop query reads
+        target's adjacency list.
+        */
+        for &(_, target) in &workload.edges {
+            let is_hub = target <= HUB_COUNT;
+            let cache_hit = cache.access(target);
+
+            match (cache_hit, is_hub) {
+                (true, true) => {
+                    hits += 1;
+                    hub_hits += 1;
+                }
+                (true, false) => {
+                    hits += 1;
+                    normal_hits += 1;
+                }
+                (false, true) => {
+                    misses += 1;
+                    hub_misses += 1;
+                }
+                (false, false) => {
+                    misses += 1;
+                    normal_misses += 1;
+                }
+            }
+        }
+
+        let total_accesses = hits + misses;
+
+        if total_accesses != workload.edges.len() as u64 {
+            return Err("Cache accounting does not match workload".to_string());
+        }
+
+        let hit_rate = percentage(hits, total_accesses);
+
+        let hub_hit_rate = percentage(hub_hits, hub_hits + hub_misses);
+
+        let normal_hit_rate = percentage(normal_hits, normal_hits + normal_misses);
+
+        println!(
+            "{:<10} {:<10} {:<10} {:>10.2}% {:>10.2}% {:>10.2}%",
+            capacity, hits, misses, hit_rate, hub_hit_rate, normal_hit_rate,
+        );
+
+        csv_rows.push(format!(
+            "{capacity},{total_accesses},{hits},{misses},\
+             {hit_rate:.2},{hub_hit_rate:.2},\
+             {normal_hit_rate:.2},{hits}"
+        ));
+    }
+
+    write_csv("results/cache_baseline.csv", &csv_rows)?;
+
+    println!("\nSaved results to results/cache_baseline.csv");
+
+    Ok(())
+}
+
+fn percentage(part: u64, total: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+
+    part as f64 / total as f64 * 100.0
+}
+
+fn simulate_cache_run(
+    edges: &[(u64, u64)],
+    capacity: usize,
+    preloaded_user_ids: &[u64],
+) -> Result<CacheRunStats, String> {
+    let mut cache = LruCache::new(capacity)?;
+
+    /*
+    Preloading happens before measured traffic begins.
+
+    Calling access() inserts the user ID into the cache.
+    We deliberately do not count these preload operations
+    as cache hits or misses.
+    */
+    for &user_id in preloaded_user_ids.iter().take(capacity) {
+        cache.access(user_id);
+    }
+
+    let mut hits = 0_u64;
+    let mut misses = 0_u64;
+
+    let mut startup_hits = 0_u64;
+    let mut startup_accesses = 0_u64;
+
+    for (index, &(_, target)) in edges.iter().enumerate() {
+        let cache_hit = cache.access(target);
+
+        if cache_hit {
+            hits += 1;
+        } else {
+            misses += 1;
+        }
+
+        if index < CACHE_STARTUP_WINDOW {
+            startup_accesses += 1;
+
+            if cache_hit {
+                startup_hits += 1;
+            }
+        }
+    }
+
+    Ok(CacheRunStats {
+        hits,
+        misses,
+        startup_hits,
+        startup_accesses,
+    })
+}
+
+fn run_hotspot_cache_warming_benchmark() -> Result<(), String> {
+    let workload = generate_hub_workload(
+        USER_COUNT,
+        HUB_COUNT,
+        EDGES_PER_USER,
+        HUB_EDGES_PER_USER,
+        SEED,
+    )?;
+
+    /*
+    Count how many incoming edges each hub receives.
+
+    A hub with more incoming edges will be read more often
+    during this two-hop workload.
+    */
+    let mut hub_read_counts = vec![0_u64; (HUB_COUNT + 1) as usize];
+
+    for &(_, target) in &workload.edges {
+        if target <= HUB_COUNT {
+            hub_read_counts[target as usize] += 1;
+        }
+    }
+
+    /*
+    Sort hubs from most popular to least popular.
+
+    Example:
+    [59, 25, 53, ...]
+    */
+    let mut ranked_hubs: Vec<u64> = (1..=HUB_COUNT).collect();
+
+    ranked_hubs.sort_by(|left, right| {
+        hub_read_counts[*right as usize]
+            .cmp(&hub_read_counts[*left as usize])
+            .then_with(|| left.cmp(right))
+    });
+
+    println!(
+        "\nDegree-warmed LRU cache on hub-heavy workload\n\
+         Cache warming: preload the most-followed hubs\n\
+         Startup window: first {CACHE_STARTUP_WINDOW} reads\n"
+    );
+
+    println!(
+        "{:<10} {:<11} {:<13} {:<13} {:<15} {:<15}",
+        "Capacity", "Preloaded", "Cold total", "Warm total", "Cold first 1k", "Warm first 1k",
+    );
+
+    println!("{}", "-".repeat(86));
+
+    let mut csv_rows = vec![
+        "capacity,preloaded_hubs,cold_hits,cold_misses,\
+         warmed_hits,warmed_misses,cold_hit_rate_percent,\
+         warmed_hit_rate_percent,cold_startup_hit_rate_percent,\
+         warmed_startup_hit_rate_percent"
+            .replace(' ', ""),
+    ];
+
+    for capacity in CACHE_CAPACITIES {
+        let preload_count = capacity.min(ranked_hubs.len());
+
+        let preloaded_hubs = &ranked_hubs[..preload_count];
+
+        let cold = simulate_cache_run(&workload.edges, capacity, &[])?;
+
+        let warmed = simulate_cache_run(&workload.edges, capacity, preloaded_hubs)?;
+
+        let cold_total_accesses = cold.hits + cold.misses;
+
+        let warmed_total_accesses = warmed.hits + warmed.misses;
+
+        let cold_hit_rate = percentage(cold.hits, cold_total_accesses);
+
+        let warmed_hit_rate = percentage(warmed.hits, warmed_total_accesses);
+
+        let cold_startup_hit_rate = percentage(cold.startup_hits, cold.startup_accesses);
+
+        let warmed_startup_hit_rate = percentage(warmed.startup_hits, warmed.startup_accesses);
+
+        println!(
+            "{:<10} {:<11} {:>11.2}% {:>11.2}% {:>13.2}% {:>13.2}%",
+            capacity,
+            preload_count,
+            cold_hit_rate,
+            warmed_hit_rate,
+            cold_startup_hit_rate,
+            warmed_startup_hit_rate,
+        );
+
+        csv_rows.push(format!(
+            "{capacity},{preload_count},{},{},{},{},\
+             {:.2},{:.2},{:.2},{:.2}",
+            cold.hits,
+            cold.misses,
+            warmed.hits,
+            warmed.misses,
+            cold_hit_rate,
+            warmed_hit_rate,
+            cold_startup_hit_rate,
+            warmed_startup_hit_rate,
+        ));
+    }
+
+    write_csv("results/cache_warming.csv", &csv_rows)?;
+
+    println!("\nSaved results to results/cache_warming.csv");
 
     Ok(())
 }
