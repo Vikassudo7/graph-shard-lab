@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
-use crate::{Graph, User, balanced::assign_communities_balanced};
-
+use crate::{Graph, User, balanced::assign_communities_balanced, cache::AdjacencyLruCache};
 #[derive(Debug, Clone)]
 pub enum Placement {
     Hash,
@@ -40,14 +39,38 @@ pub struct QueryResult {
     pub shard_requests: usize,
 }
 
+#[derive(Debug)]
+pub struct CachedQueryResult {
+    pub user_ids: Vec<u64>,
+    pub shards_touched: usize,
+    pub cross_shard_hops: usize,
+    pub shard_requests: usize,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+}
+
 pub struct ShardedGraph {
     shards: Vec<Graph>,
+
+    // None means caching is disabled.
+    //
+    // Some(caches) contains exactly one independent cache
+    // for each logical shard.
+    caches: Option<Vec<AdjacencyLruCache>>,
+
     placement: Placement,
 }
 
 impl ShardedGraph {
     pub fn new(shard_count: usize) -> Result<Self, String> {
         Self::with_placement(shard_count, Placement::Hash)
+    }
+
+    pub fn new_with_cache(
+        shard_count: usize,
+        cache_capacity_per_shard: usize,
+    ) -> Result<Self, String> {
+        Self::with_placement_and_cache(shard_count, Placement::Hash, cache_capacity_per_shard)
     }
 
     /*
@@ -119,7 +142,34 @@ impl ShardedGraph {
             shards.push(Graph::new());
         }
 
-        Ok(Self { shards, placement })
+        Ok(Self {
+            shards,
+            caches: None,
+            placement,
+        })
+    }
+    pub fn with_placement_and_cache(
+        shard_count: usize,
+        placement: Placement,
+        cache_capacity_per_shard: usize,
+    ) -> Result<Self, String> {
+        /*
+        First use the existing constructor.
+
+        This reuses all current validation for shard count
+        and placement configuration.
+        */
+        let mut graph = Self::with_placement(shard_count, placement)?;
+
+        let mut caches = Vec::with_capacity(shard_count);
+
+        for _ in 0..shard_count {
+            caches.push(AdjacencyLruCache::new(cache_capacity_per_shard)?);
+        }
+
+        graph.caches = Some(caches);
+
+        Ok(graph)
     }
 
     /*
@@ -265,6 +315,118 @@ impl ShardedGraph {
         }
     }
 
+    pub fn get_two_hop_with_cache_stats(
+        &mut self,
+        source: u64,
+    ) -> Result<CachedQueryResult, String> {
+        if self.caches.is_none() {
+            return Err("Caching is disabled for this ShardedGraph".to_string());
+        }
+
+        let Some(source_shard) = self.try_shard_for(source) else {
+            return Ok(CachedQueryResult {
+                user_ids: Vec::new(),
+                shards_touched: 0,
+                cross_shard_hops: 0,
+                shard_requests: 0,
+                cache_hits: 0,
+                cache_misses: 0,
+            });
+        };
+
+        /*
+        Copy this list so we do not keep an immutable borrow
+        of self while mutating the caches.
+        */
+        let first_hops = self.get_following_ids(source).to_vec();
+
+        let mut user_ids = Vec::new();
+        let mut seen_users = HashSet::new();
+        let mut touched_shards = HashSet::new();
+
+        let mut cross_shard_hops = 0;
+        let mut shard_requests = 1;
+
+        let mut cache_hits = 0;
+        let mut cache_misses = 0;
+
+        touched_shards.insert(source_shard);
+
+        for first_hop in first_hops {
+            let Some(first_hop_shard) = self.try_shard_for(first_hop) else {
+                continue;
+            };
+
+            touched_shards.insert(first_hop_shard);
+
+            if first_hop_shard != source_shard {
+                cross_shard_hops += 1;
+            }
+
+            /*
+            The query still contacts the owning shard.
+
+            A cache hit avoids reading the shard's main Graph,
+            but it does not remove the logical shard request.
+            */
+            shard_requests += 1;
+
+            let cached_adjacency_list = {
+                let caches = self.caches.as_mut().expect("Caching was checked above");
+
+                caches[first_hop_shard].get(first_hop)
+            };
+
+            let second_hops = match cached_adjacency_list {
+                Some(adjacency_list) => {
+                    cache_hits += 1;
+                    adjacency_list
+                }
+
+                None => {
+                    cache_misses += 1;
+
+                    let adjacency_list = self.shards[first_hop_shard]
+                        .get_following_ids(first_hop)
+                        .to_vec();
+
+                    {
+                        let caches = self.caches.as_mut().expect("Caching was checked above");
+
+                        caches[first_hop_shard].insert(first_hop, adjacency_list.clone());
+                    }
+
+                    adjacency_list
+                }
+            };
+
+            for second_hop in second_hops {
+                let Some(second_hop_shard) = self.try_shard_for(second_hop) else {
+                    continue;
+                };
+
+                touched_shards.insert(second_hop_shard);
+
+                if second_hop_shard != first_hop_shard {
+                    cross_shard_hops += 1;
+                }
+
+                if second_hop != source && seen_users.insert(second_hop) {
+                    user_ids.push(second_hop);
+                }
+            }
+        }
+
+        Ok(CachedQueryResult {
+            user_ids,
+            shards_touched: touched_shards.len(),
+            cross_shard_hops,
+            shard_requests,
+            cache_hits,
+            cache_misses,
+        })
+    }
+
     pub fn get_two_hop_batched_with_stats(&self, source: u64) -> QueryResult {
         let Some(source_shard) = self.try_shard_for(source) else {
             return QueryResult {
@@ -387,6 +549,85 @@ mod tests {
         assert_eq!(graph.shard_for(5), graph.shard_for(8));
 
         assert_ne!(graph.shard_for(1), graph.shard_for(5));
+    }
+
+    fn build_cached_sample_graph() -> ShardedGraph {
+        let mut graph = ShardedGraph::new_with_cache(2, 10).unwrap();
+
+        for id in 1..=4 {
+            graph.add_user(id, &format!("user-{id}")).unwrap();
+        }
+
+        graph.add_follow(1, 2).unwrap();
+        graph.add_follow(1, 3).unwrap();
+        graph.add_follow(2, 3).unwrap();
+        graph.add_follow(3, 4).unwrap();
+
+        graph
+    }
+
+    #[test]
+    fn cached_sharded_query_matches_uncached_query() {
+        let mut graph = build_cached_sample_graph();
+
+        let mut expected = graph.get_two_hop_with_stats(1).user_ids;
+
+        let cached = graph.get_two_hop_with_cache_stats(1).unwrap();
+
+        let mut actual = cached.user_ids;
+
+        expected.sort_unstable();
+        actual.sort_unstable();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn cached_sharded_query_misses_then_hits() {
+        let mut graph = build_cached_sample_graph();
+
+        let first = graph.get_two_hop_with_cache_stats(1).unwrap();
+
+        assert_eq!(first.cache_hits, 0);
+        assert_eq!(first.cache_misses, 2);
+
+        let second = graph.get_two_hop_with_cache_stats(1).unwrap();
+
+        assert_eq!(second.cache_hits, 2);
+        assert_eq!(second.cache_misses, 0);
+    }
+
+    #[test]
+    fn cached_query_rejects_graph_without_caches() {
+        let mut graph = ShardedGraph::new(2).unwrap();
+
+        assert!(graph.get_two_hop_with_cache_stats(1).is_err());
+    }
+
+    #[test]
+    fn existing_constructor_keeps_caching_disabled() {
+        let graph = ShardedGraph::new(4).unwrap();
+
+        assert!(graph.caches.is_none());
+    }
+
+    #[test]
+    fn cached_constructor_creates_one_cache_per_shard() {
+        let graph = ShardedGraph::new_with_cache(4, 100).unwrap();
+
+        let caches = graph.caches.as_ref().unwrap();
+
+        assert_eq!(caches.len(), 4);
+
+        for cache in caches {
+            assert_eq!(cache.capacity(), 100);
+            assert!(cache.is_empty());
+        }
+    }
+
+    #[test]
+    fn cached_constructor_rejects_zero_capacity() {
+        assert!(ShardedGraph::new_with_cache(4, 0).is_err());
     }
 
     #[test]

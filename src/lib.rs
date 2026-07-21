@@ -4,12 +4,20 @@ pub mod sharded;
 pub mod uneven;
 pub mod workload;
 
+use cache::AdjacencyLruCache;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug)]
 pub struct User {
     pub id: u64,
     pub name: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct CachedTwoHopResult {
+    pub user_ids: Vec<u64>,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
 }
 
 #[derive(Debug)]
@@ -94,6 +102,49 @@ impl Graph {
         result
     }
 
+    pub fn get_two_hop_ids_with_cache(
+        &self,
+        source: u64,
+        cache: &mut AdjacencyLruCache,
+    ) -> CachedTwoHopResult {
+        let mut result = Vec::new();
+        let mut seen = HashSet::new();
+
+        let mut cache_hits = 0;
+        let mut cache_misses = 0;
+
+        for first_hop in self.get_following_ids(source) {
+            let second_hops = match cache.get(*first_hop) {
+                Some(cached_adjacency_list) => {
+                    cache_hits += 1;
+                    cached_adjacency_list
+                }
+
+                None => {
+                    cache_misses += 1;
+
+                    let adjacency_list = self.get_following_ids(*first_hop).to_vec();
+
+                    cache.insert(*first_hop, adjacency_list.clone());
+
+                    adjacency_list
+                }
+            };
+
+            for second_hop in second_hops {
+                if second_hop != source && seen.insert(second_hop) {
+                    result.push(second_hop);
+                }
+            }
+        }
+
+        CachedTwoHopResult {
+            user_ids: result,
+            cache_hits,
+            cache_misses,
+        }
+    }
+
     pub fn user_count(&self) -> usize {
         self.users.len()
     }
@@ -172,6 +223,38 @@ mod tests {
         graph.add_user(1, "Alice").unwrap();
 
         assert!(graph.add_user(1, "Different Alice").is_err());
+    }
+
+    #[test]
+    fn cached_two_hop_query_returns_same_users() {
+        let graph = build_sample_graph();
+
+        let expected = graph.get_two_hop_ids(1);
+
+        let mut cache = AdjacencyLruCache::new(10).unwrap();
+
+        let cached = graph.get_two_hop_ids_with_cache(1, &mut cache);
+
+        assert_eq!(cached.user_ids, expected);
+    }
+
+    #[test]
+    fn cached_two_hop_query_misses_then_hits() {
+        let graph = build_sample_graph();
+
+        let mut cache = AdjacencyLruCache::new(10).unwrap();
+
+        let first = graph.get_two_hop_ids_with_cache(1, &mut cache);
+
+        assert_eq!(first.user_ids, vec![3, 4]);
+        assert_eq!(first.cache_hits, 0);
+        assert_eq!(first.cache_misses, 2);
+
+        let second = graph.get_two_hop_ids_with_cache(1, &mut cache);
+
+        assert_eq!(second.user_ids, vec![3, 4]);
+        assert_eq!(second.cache_hits, 2);
+        assert_eq!(second.cache_misses, 0);
     }
 
     #[test]
