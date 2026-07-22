@@ -225,20 +225,7 @@ Reduction	59.92%	75.05%	74.13%
 
 The batched implementation reduced median latency by 59.92% and p99 latency by 74.13% in this simulated workload.
 
-Results are saved to:
 
-results/distributed_latency.csv
-
-Run the benchmark with:
-
-cargo run --bin distributed_latency
-
-Then commit the documentation:
-
-```bash
-git add README.md
-git commit -m "document distributed shard simulation"
-git push
 
 
 ### Degree-based cache warming
