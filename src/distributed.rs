@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinSet;
 
 use crate::Graph;
 
@@ -318,9 +319,21 @@ impl DistributedShardedGraph {
         shard containing first-hop users.
         */
         let shard_requests = 1 + batches.len();
+        let mut pending_batches = JoinSet::new();
 
         for (shard_id, sources) in batches {
-            let adjacency_lists = self.workers[shard_id].get_following_batch(sources).await?;
+            let worker = self.workers[shard_id].clone();
+
+            pending_batches.spawn(async move {
+                let adjacency_lists = worker.get_following_batch(sources).await?;
+
+                Ok::<_, String>((shard_id, adjacency_lists))
+            });
+        }
+
+        while let Some(joined_batch) = pending_batches.join_next().await {
+            let (_shard_id, adjacency_lists) =
+                joined_batch.map_err(|error| format!("Shard batch task failed: {error}"))??;
 
             for (_first_hop, second_hops) in adjacency_lists {
                 for second_hop in second_hops {
@@ -403,6 +416,38 @@ mod tests {
 
         // Source request plus one message to each of two shards.
         assert_eq!(batched.shard_requests, 3);
+    }
+
+    #[tokio::test]
+    async fn concurrent_batches_collect_results_from_all_shards() {
+        let mut graph = DistributedShardedGraph::new(4, 32).unwrap();
+
+        for id in 1..=12 {
+            graph.add_user(id, &format!("user-{id}")).await.unwrap();
+        }
+
+        /*
+        First-hop users are spread across all four shards.
+        */
+        graph.add_follow(1, 4).await.unwrap();
+        graph.add_follow(1, 5).await.unwrap();
+        graph.add_follow(1, 6).await.unwrap();
+        graph.add_follow(1, 7).await.unwrap();
+
+        graph.add_follow(4, 8).await.unwrap();
+        graph.add_follow(5, 9).await.unwrap();
+        graph.add_follow(6, 10).await.unwrap();
+        graph.add_follow(7, 11).await.unwrap();
+
+        let direct = graph.get_two_hop(1).await.unwrap();
+
+        let batched = graph.get_two_hop_batched(1).await.unwrap();
+
+        assert_eq!(batched.user_ids, direct.user_ids);
+        assert_eq!(batched.user_ids, vec![8, 9, 10, 11]);
+
+        // Source request plus one message to each of four shards.
+        assert_eq!(batched.shard_requests, 5);
     }
 
     #[tokio::test]
