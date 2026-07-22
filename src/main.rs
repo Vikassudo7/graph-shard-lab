@@ -6,6 +6,7 @@ use std::{
 use graph_shard_lab::{
     Graph,
     cache::IdLruSimulator,
+    error::{GraphError, Result},
     sharded::{Placement, QueryResult, ShardedGraph},
     uneven::generate_uneven_community_workload,
     workload::{
@@ -35,7 +36,31 @@ const CACHE_CAPACITIES: [usize; 6] = [25, 50, 100, 250, 500, 1_000];
 const CACHE_STARTUP_WINDOW: usize = 1000;
 const REAL_CACHE_CAPACITIES_PER_SHARD: [usize; 4] = [25, 50, 100, 250];
 
-fn main() -> Result<(), String> {
+struct Benchmark {
+    csv_path: &'static str,
+    csv_rows: Vec<String>,
+}
+
+impl Benchmark {
+    fn new(csv_path: &'static str, csv_header: &str) -> Self {
+        Self {
+            csv_path,
+            csv_rows: vec![csv_header.to_string()],
+        }
+    }
+
+    fn add_csv_row(&mut self, row: String) {
+        self.csv_rows.push(row);
+    }
+
+    fn flush(&self) -> Result<()> {
+        write_csv(self.csv_path, &self.csv_rows)?;
+        println!("\nSaved results to {}", self.csv_path);
+        Ok(())
+    }
+}
+
+fn main() -> Result<()> {
     run_locality_sweep()?;
     run_uneven_community_benchmark()?;
     run_multi_seed_shard_sweep()?;
@@ -48,7 +73,7 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-fn run_locality_sweep() -> Result<(), String> {
+fn run_locality_sweep() -> Result<()> {
     let community_size = USER_COUNT / COMMUNITY_COUNT;
 
     println!(
@@ -74,14 +99,12 @@ fn run_locality_sweep() -> Result<(), String> {
 
     println!("{}", "-".repeat(124));
 
-    let mut csv_rows = Vec::new();
-
-    csv_rows.push(
+    let mut bench = Benchmark::new(
+        "results/locality_sweep.csv",
         "local_edges,hash_hops,community_hops,\
          reduction_percent,community_shards,\
          direct_shard_requests,batched_shard_requests,\
-         request_reduction_percent"
-            .replace(' ', ""),
+         request_reduction_percent",
     );
 
     for local_edges_per_user in LOCAL_EDGE_COUNTS {
@@ -124,7 +147,7 @@ fn run_locality_sweep() -> Result<(), String> {
             community_stats.request_reduction_percent,
         );
 
-        csv_rows.push(format!(
+        bench.add_csv_row(format!(
             "{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}",
             local_edges_per_user,
             hash_stats.average_cross_shard_hops,
@@ -137,9 +160,7 @@ fn run_locality_sweep() -> Result<(), String> {
         ));
     }
 
-    write_csv("results/locality_sweep.csv", &csv_rows)?;
-
-    println!("\nSaved results to results/locality_sweep.csv");
+    bench.flush()?;
 
     let example_workload =
         generate_community_workload(USER_COUNT, COMMUNITY_COUNT, EDGES_PER_USER, 7, SEED)?;
@@ -167,7 +188,7 @@ fn run_locality_sweep() -> Result<(), String> {
     Ok(())
 }
 
-fn run_uneven_community_benchmark() -> Result<(), String> {
+fn run_uneven_community_benchmark() -> Result<()> {
     println!("\n");
     println!("Uneven community benchmark");
     println!("Community sizes: {:?}", UNEVEN_COMMUNITY_SIZES);
@@ -183,31 +204,10 @@ fn run_uneven_community_benchmark() -> Result<(), String> {
         SEED,
     )?;
 
-    /*
-    The reference graph is not sharded.
-
-    It tells us the correct query answers.
-    */
     let reference = build_reference_graph(&workload)?;
 
-    /*
-    Strategy 1: Hash placement.
-
-    Users are spread according to their IDs.
-    */
     let hash_graph = build_sharded_graph(&workload, Placement::Hash)?;
 
-    /*
-    Strategy 2: Naive community placement.
-
-    Communities are assigned in repeating order:
-
-    community 0 -> shard 0
-    community 1 -> shard 1
-    community 2 -> shard 2
-    community 3 -> shard 3
-    community 4 -> shard 0
-    */
     let naive_assignment: Vec<usize> = (0..UNEVEN_COMMUNITY_SIZES.len())
         .map(|community_id| community_id % SHARD_COUNT)
         .collect();
@@ -216,18 +216,10 @@ fn run_uneven_community_benchmark() -> Result<(), String> {
         &workload,
         Placement::BalancedCommunity {
             community_sizes: UNEVEN_COMMUNITY_SIZES.to_vec(),
-
             community_to_shard: naive_assignment,
         },
     )?;
 
-    /*
-    Strategy 3: Balanced community placement.
-
-    The largest communities are placed first.
-    Every next community goes to the shard with
-    the fewest users.
-    */
     let balanced_graph = build_balanced_graph(&workload, UNEVEN_COMMUNITY_SIZES.to_vec())?;
 
     let hash_stats = validate_and_measure(&reference, &hash_graph, workload.user_count)?;
@@ -235,6 +227,7 @@ fn run_uneven_community_benchmark() -> Result<(), String> {
     let naive_stats = validate_and_measure(&reference, &naive_graph, workload.user_count)?;
 
     let balanced_stats = validate_and_measure(&reference, &balanced_graph, workload.user_count)?;
+
     println!(
         "{:<22} {:<28} {:>14} {:>14} {:>12} {:>12} {:>13}",
         "Strategy",
@@ -249,38 +242,39 @@ fn run_uneven_community_benchmark() -> Result<(), String> {
     println!("{}", "-".repeat(126));
 
     print_strategy_result("Hash", &hash_graph, &hash_stats);
-
     print_strategy_result("Naive community", &naive_graph, &naive_stats);
-
     print_strategy_result("Balanced community", &balanced_graph, &balanced_stats);
 
     println!("\nEdge distribution:");
-
     println!("Hash:               {:?}", hash_graph.edges_per_shard());
-
     println!("Naive community:    {:?}", naive_graph.edges_per_shard());
-
     println!("Balanced community: {:?}", balanced_graph.edges_per_shard());
 
-    let csv_rows = vec![
+    let mut bench = Benchmark::new(
+        "results/uneven_communities.csv",
         "strategy,average_cross_shard_hops,\
          average_shards_touched,user_imbalance_percent,\
          edge_imbalance_percent,direct_shard_requests,\
-         batched_shard_requests,request_reduction_percent"
-            .replace(' ', ""),
-        strategy_csv_row("hash", &hash_graph, &hash_stats),
-        strategy_csv_row("naive_community", &naive_graph, &naive_stats),
-        strategy_csv_row("balanced_community", &balanced_graph, &balanced_stats),
-    ];
-    write_csv("results/uneven_communities.csv", &csv_rows)?;
-
-    println!(
-        "\nSaved results to \
-         results/uneven_communities.csv"
+         batched_shard_requests,request_reduction_percent",
     );
+
+    bench.add_csv_row(strategy_csv_row("hash", &hash_graph, &hash_stats));
+    bench.add_csv_row(strategy_csv_row(
+        "naive_community",
+        &naive_graph,
+        &naive_stats,
+    ));
+    bench.add_csv_row(strategy_csv_row(
+        "balanced_community",
+        &balanced_graph,
+        &balanced_stats,
+    ));
+
+    bench.flush()?;
 
     Ok(())
 }
+
 #[derive(Debug)]
 struct CacheRunStats {
     hits: u64,
@@ -304,7 +298,8 @@ struct AggregateStats {
     average_batched_shard_requests: f64,
     request_reduction_percent: f64,
 }
-fn run_multi_seed_shard_sweep() -> Result<(), String> {
+
+fn run_multi_seed_shard_sweep() -> Result<()> {
     let community_size = USER_COUNT / SWEEP_COMMUNITY_COUNT;
 
     println!(
@@ -322,12 +317,12 @@ fn run_multi_seed_shard_sweep() -> Result<(), String> {
 
     println!("{}", "-".repeat(86));
 
-    let mut csv_rows = vec![
+    let mut bench = Benchmark::new(
+        "results/batching_sweep.csv",
         "local_edges_per_user,shard_count,seed_count,\
          average_direct_shard_requests,average_batched_shard_requests,\
-         request_reduction_percent"
-            .replace(' ', ""),
-    ];
+         request_reduction_percent",
+    );
 
     for local_edges_per_user in SWEEP_LOCAL_EDGE_COUNTS {
         for shard_count in SWEEP_SHARD_COUNTS {
@@ -375,7 +370,7 @@ fn run_multi_seed_shard_sweep() -> Result<(), String> {
                 reduction,
             );
 
-            csv_rows.push(format!(
+            bench.add_csv_row(format!(
                 "{},{},{},{:.2},{:.2},{:.2}",
                 local_edges_per_user,
                 shard_count,
@@ -387,14 +382,12 @@ fn run_multi_seed_shard_sweep() -> Result<(), String> {
         }
     }
 
-    write_csv("results/batching_sweep.csv", &csv_rows)?;
-
-    println!("\nSaved results to results/batching_sweep.csv");
+    bench.flush()?;
 
     Ok(())
 }
 
-fn run_hub_hotspot_baseline() -> Result<(), String> {
+fn run_hub_hotspot_baseline() -> Result<()> {
     let workload = generate_hub_workload(
         USER_COUNT,
         HUB_COUNT,
@@ -403,15 +396,8 @@ fn run_hub_hotspot_baseline() -> Result<(), String> {
         SEED,
     )?;
 
-    // Index 0 is unused because user IDs begin at 1.
     let mut adjacency_reads = vec![0_u64; (workload.user_count + 1) as usize];
 
-    /*
-    Every edge source -> target means that target appears as a
-    first-hop user when querying source.
-
-    The two-hop query must then read target's adjacency list.
-    */
     for &(_, target) in &workload.edges {
         adjacency_reads[target as usize] += 1;
     }
@@ -460,14 +446,8 @@ fn run_hub_hotspot_baseline() -> Result<(), String> {
     println!("Reads targeting hubs: {hub_reads}");
     println!("Hub share of reads: {hub_read_share:.2}%");
     println!("Average reads per hub: {average_hub_reads:.2}");
-    println!(
-        "Average reads per normal user: \
-         {average_normal_reads:.2}"
-    );
-    println!(
-        "Average hub-to-normal read multiplier: \
-         {hotspot_multiplier:.2}x"
-    );
+    println!("Average reads per normal user: {average_normal_reads:.2}");
+    println!("Average hub-to-normal read multiplier: {hotspot_multiplier:.2}x");
 
     println!("\nTop 10 most-read adjacency lists:");
 
@@ -494,21 +474,19 @@ fn run_hub_hotspot_baseline() -> Result<(), String> {
         );
     }
 
-    let mut csv_rows = vec!["user_id,is_hub,adjacency_reads".to_string()];
+    let mut bench = Benchmark::new("results/hub_hotspot.csv", "user_id,is_hub,adjacency_reads");
 
     for (user_id, reads) in ranked_users {
         let is_hub = user_id <= HUB_COUNT;
-
-        csv_rows.push(format!("{user_id},{is_hub},{reads}"));
+        bench.add_csv_row(format!("{user_id},{is_hub},{reads}"));
     }
 
-    write_csv("results/hub_hotspot.csv", &csv_rows)?;
-
-    println!("\nSaved results to results/hub_hotspot.csv");
+    bench.flush()?;
 
     Ok(())
 }
-fn run_hotspot_cache_baseline() -> Result<(), String> {
+
+fn run_hotspot_cache_baseline() -> Result<()> {
     let workload = generate_hub_workload(
         USER_COUNT,
         HUB_COUNT,
@@ -531,12 +509,12 @@ fn run_hotspot_cache_baseline() -> Result<(), String> {
 
     println!("{}", "-".repeat(72));
 
-    let mut csv_rows = vec![
+    let mut bench = Benchmark::new(
+        "results/cache_baseline.csv",
         "capacity,total_accesses,hits,misses,hit_rate_percent,\
          hub_hit_rate_percent,normal_hit_rate_percent,\
-         main_graph_reads_avoided"
-            .replace(' ', ""),
-    ];
+         main_graph_reads_avoided",
+    );
 
     for capacity in CACHE_CAPACITIES {
         let mut cache = IdLruSimulator::new(capacity)?;
@@ -550,12 +528,6 @@ fn run_hotspot_cache_baseline() -> Result<(), String> {
         let mut normal_hits = 0_u64;
         let mut normal_misses = 0_u64;
 
-        /*
-        The edge order represents running one query from each source.
-
-        For every source -> target edge, the two-hop query reads
-        target's adjacency list.
-        */
         for &(_, target) in &workload.edges {
             let is_hub = target <= HUB_COUNT;
             let cache_hit = cache.access(target);
@@ -583,7 +555,7 @@ fn run_hotspot_cache_baseline() -> Result<(), String> {
         let total_accesses = hits + misses;
 
         if total_accesses != workload.edges.len() as u64 {
-            return Err("Cache accounting does not match workload".to_string());
+            return Err(GraphError::CacheAccountingMismatch);
         }
 
         let hit_rate = percentage(hits, total_accesses);
@@ -597,16 +569,14 @@ fn run_hotspot_cache_baseline() -> Result<(), String> {
             capacity, hits, misses, hit_rate, hub_hit_rate, normal_hit_rate,
         );
 
-        csv_rows.push(format!(
+        bench.add_csv_row(format!(
             "{capacity},{total_accesses},{hits},{misses},\
              {hit_rate:.2},{hub_hit_rate:.2},\
              {normal_hit_rate:.2},{hits}"
         ));
     }
 
-    write_csv("results/cache_baseline.csv", &csv_rows)?;
-
-    println!("\nSaved results to results/cache_baseline.csv");
+    bench.flush()?;
 
     Ok(())
 }
@@ -623,16 +593,9 @@ fn simulate_cache_run(
     edges: &[(u64, u64)],
     capacity: usize,
     preloaded_user_ids: &[u64],
-) -> Result<CacheRunStats, String> {
+) -> Result<CacheRunStats> {
     let mut cache = IdLruSimulator::new(capacity)?;
 
-    /*
-    Preloading happens before measured traffic begins.
-
-    Calling access() inserts the user ID into the cache.
-    We deliberately do not count these preload operations
-    as cache hits or misses.
-    */
     for &user_id in preloaded_user_ids.iter().take(capacity) {
         cache.access(user_id);
     }
@@ -669,7 +632,7 @@ fn simulate_cache_run(
     })
 }
 
-fn run_hotspot_cache_warming_benchmark() -> Result<(), String> {
+fn run_hotspot_cache_warming_benchmark() -> Result<()> {
     let workload = generate_hub_workload(
         USER_COUNT,
         HUB_COUNT,
@@ -678,12 +641,6 @@ fn run_hotspot_cache_warming_benchmark() -> Result<(), String> {
         SEED,
     )?;
 
-    /*
-    Count how many incoming edges each hub receives.
-
-    A hub with more incoming edges will be read more often
-    during this two-hop workload.
-    */
     let mut hub_read_counts = vec![0_u64; (HUB_COUNT + 1) as usize];
 
     for &(_, target) in &workload.edges {
@@ -692,12 +649,6 @@ fn run_hotspot_cache_warming_benchmark() -> Result<(), String> {
         }
     }
 
-    /*
-    Sort hubs from most popular to least popular.
-
-    Example:
-    [59, 25, 53, ...]
-    */
     let mut ranked_hubs: Vec<u64> = (1..=HUB_COUNT).collect();
 
     ranked_hubs.sort_by(|left, right| {
@@ -719,13 +670,13 @@ fn run_hotspot_cache_warming_benchmark() -> Result<(), String> {
 
     println!("{}", "-".repeat(86));
 
-    let mut csv_rows = vec![
+    let mut bench = Benchmark::new(
+        "results/cache_warming.csv",
         "capacity,preloaded_hubs,cold_hits,cold_misses,\
          warmed_hits,warmed_misses,cold_hit_rate_percent,\
          warmed_hit_rate_percent,cold_startup_hit_rate_percent,\
-         warmed_startup_hit_rate_percent"
-            .replace(' ', ""),
-    ];
+         warmed_startup_hit_rate_percent",
+    );
 
     for capacity in CACHE_CAPACITIES {
         let preload_count = capacity.min(ranked_hubs.len());
@@ -758,7 +709,7 @@ fn run_hotspot_cache_warming_benchmark() -> Result<(), String> {
             warmed_startup_hit_rate,
         );
 
-        csv_rows.push(format!(
+        bench.add_csv_row(format!(
             "{capacity},{preload_count},{},{},{},{},\
              {:.2},{:.2},{:.2},{:.2}",
             cold.hits,
@@ -772,14 +723,12 @@ fn run_hotspot_cache_warming_benchmark() -> Result<(), String> {
         ));
     }
 
-    write_csv("results/cache_warming.csv", &csv_rows)?;
-
-    println!("\nSaved results to results/cache_warming.csv");
+    bench.flush()?;
 
     Ok(())
 }
 
-fn build_hub_reference_graph(workload: &HubWorkload) -> Result<Graph, String> {
+fn build_hub_reference_graph(workload: &HubWorkload) -> Result<Graph> {
     let mut graph = Graph::new();
 
     for id in 1..=workload.user_count {
@@ -796,7 +745,7 @@ fn build_hub_reference_graph(workload: &HubWorkload) -> Result<Graph, String> {
 fn build_cached_hub_sharded_graph(
     workload: &HubWorkload,
     cache_capacity_per_shard: usize,
-) -> Result<ShardedGraph, String> {
+) -> Result<ShardedGraph> {
     let mut graph = ShardedGraph::with_placement_and_cache(
         SHARD_COUNT,
         Placement::Hash,
@@ -814,7 +763,7 @@ fn build_cached_hub_sharded_graph(
     Ok(graph)
 }
 
-fn run_real_sharded_cache_benchmark() -> Result<(), String> {
+fn run_real_sharded_cache_benchmark() -> Result<()> {
     let workload = generate_hub_workload(
         USER_COUNT,
         HUB_COUNT,
@@ -840,12 +789,12 @@ fn run_real_sharded_cache_benchmark() -> Result<(), String> {
 
     println!("{}", "-".repeat(70));
 
-    let mut csv_rows = vec![
+    let mut bench = Benchmark::new(
+        "results/real_sharded_cache.csv",
         "cache_capacity_per_shard,total_cache_capacity,\
          total_queries,total_accesses,cache_hits,cache_misses,\
-         hit_rate_percent"
-            .replace(' ', ""),
-    ];
+         hit_rate_percent",
+    );
 
     for capacity_per_shard in REAL_CACHE_CAPACITIES_PER_SHARD {
         let mut sharded = build_cached_hub_sharded_graph(&workload, capacity_per_shard)?;
@@ -864,9 +813,7 @@ fn run_real_sharded_cache_benchmark() -> Result<(), String> {
             actual.sort_unstable();
 
             if actual != expected {
-                return Err(format!(
-                    "Cached query returned incorrect users for source {source}"
-                ));
+                return Err(GraphError::CorrectnessMismatch(source));
             }
 
             total_hits += cached.cache_hits;
@@ -878,10 +825,7 @@ fn run_real_sharded_cache_benchmark() -> Result<(), String> {
         let expected_accesses = workload.edges.len();
 
         if total_accesses != expected_accesses {
-            return Err(format!(
-                "Expected {expected_accesses} cache accesses, \
-                 but recorded {total_accesses}"
-            ));
+            return Err(GraphError::CacheAccountingMismatch);
         }
 
         let hit_rate = percentage(total_hits as u64, total_accesses as u64);
@@ -893,7 +837,7 @@ fn run_real_sharded_cache_benchmark() -> Result<(), String> {
             capacity_per_shard, total_capacity, total_hits, total_misses, hit_rate,
         );
 
-        csv_rows.push(format!(
+        bench.add_csv_row(format!(
             "{},{},{},{},{},{},{:.2}",
             capacity_per_shard,
             total_capacity,
@@ -905,12 +849,7 @@ fn run_real_sharded_cache_benchmark() -> Result<(), String> {
         ));
     }
 
-    write_csv("results/real_sharded_cache.csv", &csv_rows)?;
-
-    println!(
-        "\nSaved results to \
-         results/real_sharded_cache.csv"
-    );
+    bench.flush()?;
 
     Ok(())
 }
@@ -919,9 +858,9 @@ fn run_real_cached_queries(
     reference: &Graph,
     sharded: &mut ShardedGraph,
     query_count: u64,
-) -> Result<RealCacheRunStats, String> {
-    if CACHE_STARTUP_WINDOW as u64 % EDGES_PER_USER != 0 {
-        return Err("Startup window must divide evenly by edges per user".to_string());
+) -> Result<RealCacheRunStats> {
+    if !(CACHE_STARTUP_WINDOW as u64).is_multiple_of(EDGES_PER_USER) {
+        return Err(GraphError::StartupWindowMismatch);
     }
 
     let startup_query_count = CACHE_STARTUP_WINDOW as u64 / EDGES_PER_USER;
@@ -943,20 +882,12 @@ fn run_real_cached_queries(
         actual.sort_unstable();
 
         if actual != expected {
-            return Err(format!(
-                "Cached query returned incorrect users for source {source}"
-            ));
+            return Err(GraphError::CorrectnessMismatch(source));
         }
 
         hits += cached.cache_hits;
         misses += cached.cache_misses;
 
-        /*
-        Every query has exactly eight first-hop adjacency accesses.
-
-        1,000 accesses / 8 accesses per query
-        = first 125 queries.
-        */
         if source <= startup_query_count {
             startup_hits += cached.cache_hits;
             startup_misses += cached.cache_misses;
@@ -971,7 +902,7 @@ fn run_real_cached_queries(
     })
 }
 
-fn run_real_sharded_cache_warming_benchmark() -> Result<(), String> {
+fn run_real_sharded_cache_warming_benchmark() -> Result<()> {
     let workload = generate_hub_workload(
         USER_COUNT,
         HUB_COUNT,
@@ -1012,15 +943,15 @@ fn run_real_sharded_cache_warming_benchmark() -> Result<(), String> {
 
     println!("{}", "-".repeat(78));
 
-    let mut csv_rows = vec![
+    let mut bench = Benchmark::new(
+        "results/real_sharded_cache_warming.csv",
         "cache_capacity_per_shard,total_cache_capacity,\
          preloaded_hubs,cold_hits,cold_misses,warmed_hits,\
          warmed_misses,cold_hit_rate_percent,\
          warmed_hit_rate_percent,\
          cold_startup_hit_rate_percent,\
-         warmed_startup_hit_rate_percent"
-            .replace(' ', ""),
-    ];
+         warmed_startup_hit_rate_percent",
+    );
 
     for capacity_per_shard in REAL_CACHE_CAPACITIES_PER_SHARD {
         let mut cold_graph = build_cached_hub_sharded_graph(&workload, capacity_per_shard)?;
@@ -1029,10 +960,6 @@ fn run_real_sharded_cache_warming_benchmark() -> Result<(), String> {
 
         let mut warmed_graph = build_cached_hub_sharded_graph(&workload, capacity_per_shard)?;
 
-        /*
-        Each hub is inserted into the cache belonging to
-        the shard that owns that hub.
-        */
         for &hub_id in &ranked_hubs {
             warmed_graph.warm_cache_for_user(hub_id)?;
         }
@@ -1065,7 +992,7 @@ fn run_real_sharded_cache_warming_benchmark() -> Result<(), String> {
             warmed_startup_rate,
         );
 
-        csv_rows.push(format!(
+        bench.add_csv_row(format!(
             "{},{},{},{},{},{},{},{:.2},{:.2},{:.2},{:.2}",
             capacity_per_shard,
             capacity_per_shard * SHARD_COUNT,
@@ -1081,17 +1008,12 @@ fn run_real_sharded_cache_warming_benchmark() -> Result<(), String> {
         ));
     }
 
-    write_csv("results/real_sharded_cache_warming.csv", &csv_rows)?;
-
-    println!(
-        "\nSaved results to \
-         results/real_sharded_cache_warming.csv"
-    );
+    bench.flush()?;
 
     Ok(())
 }
 
-fn build_reference_graph(workload: &CommunityWorkload) -> Result<Graph, String> {
+fn build_reference_graph(workload: &CommunityWorkload) -> Result<Graph> {
     let mut graph = Graph::new();
 
     for id in 1..=workload.user_count {
@@ -1105,10 +1027,7 @@ fn build_reference_graph(workload: &CommunityWorkload) -> Result<Graph, String> 
     Ok(graph)
 }
 
-fn build_sharded_graph(
-    workload: &CommunityWorkload,
-    placement: Placement,
-) -> Result<ShardedGraph, String> {
+fn build_sharded_graph(workload: &CommunityWorkload, placement: Placement) -> Result<ShardedGraph> {
     build_sharded_graph_with_shard_count(workload, placement, SHARD_COUNT)
 }
 
@@ -1116,7 +1035,7 @@ fn build_sharded_graph_with_shard_count(
     workload: &CommunityWorkload,
     placement: Placement,
     shard_count: usize,
-) -> Result<ShardedGraph, String> {
+) -> Result<ShardedGraph> {
     let mut graph = ShardedGraph::with_placement(shard_count, placement)?;
 
     populate_sharded_graph(&mut graph, workload)?;
@@ -1127,7 +1046,7 @@ fn build_sharded_graph_with_shard_count(
 fn build_balanced_graph(
     workload: &CommunityWorkload,
     community_sizes: Vec<u64>,
-) -> Result<ShardedGraph, String> {
+) -> Result<ShardedGraph> {
     let mut graph = ShardedGraph::with_balanced_communities(SHARD_COUNT, community_sizes)?;
 
     populate_sharded_graph(&mut graph, workload)?;
@@ -1135,10 +1054,7 @@ fn build_balanced_graph(
     Ok(graph)
 }
 
-fn populate_sharded_graph(
-    graph: &mut ShardedGraph,
-    workload: &CommunityWorkload,
-) -> Result<(), String> {
+fn populate_sharded_graph(graph: &mut ShardedGraph, workload: &CommunityWorkload) -> Result<()> {
     for id in 1..=workload.user_count {
         graph.add_user(id, &format!("user-{id}"))?;
     }
@@ -1154,7 +1070,7 @@ fn validate_and_measure(
     reference: &Graph,
     sharded: &ShardedGraph,
     query_count: u64,
-) -> Result<AggregateStats, String> {
+) -> Result<AggregateStats> {
     let mut total_shards_touched = 0_usize;
     let mut total_cross_shard_hops = 0_usize;
     let mut total_direct_shard_requests = 0_usize;
@@ -1196,36 +1112,17 @@ fn validate_and_measure(
     })
 }
 
-fn validate_result(
-    source: u64,
-    expected: &mut Vec<u64>,
-    actual: &QueryResult,
-) -> Result<(), String> {
+fn validate_result(source: u64, expected: &mut Vec<u64>, actual: &QueryResult) -> Result<()> {
     let mut actual_ids = actual.user_ids.clone();
 
     expected.sort_unstable();
     actual_ids.sort_unstable();
 
     if *expected != actual_ids {
-        return Err(format!("Correctness mismatch for source user {source}"));
+        return Err(GraphError::CorrectnessMismatch(source));
     }
 
     Ok(())
-}
-fn print_strategy_result(name: &str, graph: &ShardedGraph, stats: &AggregateStats) {
-    let users = graph.users_per_shard();
-    let users_text = format!("{users:?}");
-
-    println!(
-        "{:<22} {:<28} {:>13.2}% {:>14.2} {:>12.2} {:>12.2} {:>12.2}%",
-        name,
-        users_text,
-        imbalance_percentage(&users),
-        stats.average_cross_shard_hops,
-        stats.average_direct_shard_requests,
-        stats.average_batched_shard_requests,
-        stats.request_reduction_percent,
-    );
 }
 
 fn strategy_csv_row(name: &str, graph: &ShardedGraph, stats: &AggregateStats) -> String {
@@ -1243,6 +1140,22 @@ fn strategy_csv_row(name: &str, graph: &ShardedGraph, stats: &AggregateStats) ->
         stats.average_batched_shard_requests,
         stats.request_reduction_percent,
     )
+}
+
+fn print_strategy_result(name: &str, graph: &ShardedGraph, stats: &AggregateStats) {
+    let users = graph.users_per_shard();
+    let users_text = format!("{users:?}");
+
+    println!(
+        "{:<22} {:<28} {:>13.2}% {:>14.2} {:>12.2} {:>12.2} {:>12.2}%",
+        name,
+        users_text,
+        imbalance_percentage(&users),
+        stats.average_cross_shard_hops,
+        stats.average_direct_shard_requests,
+        stats.average_batched_shard_requests,
+        stats.request_reduction_percent,
+    );
 }
 
 fn percentage_reduction(before: f64, after: f64) -> f64 {
@@ -1271,21 +1184,20 @@ fn imbalance_percentage(values: &[usize]) -> f64 {
     ((maximum - average) / average) * 100.0
 }
 
-fn write_csv(path: &str, rows: &[String]) -> Result<(), String> {
-    create_dir_all("results")
-        .map_err(|error| format!("Failed to create results directory: {error}"))?;
+fn write_csv(path: &str, rows: &[String]) -> Result<()> {
+    create_dir_all("results").map_err(|error| GraphError::IoError(error.to_string()))?;
 
-    let file = File::create(path).map_err(|error| format!("Failed to create CSV file: {error}"))?;
+    let file = File::create(path).map_err(|error| GraphError::IoError(error.to_string()))?;
 
     let mut writer = BufWriter::new(file);
 
     for row in rows {
-        writeln!(writer, "{row}").map_err(|error| format!("Failed to write CSV row: {error}"))?;
+        writeln!(writer, "{row}").map_err(|error| GraphError::IoError(error.to_string()))?;
     }
 
     writer
         .flush()
-        .map_err(|error| format!("Failed to finish CSV file: {error}"))?;
+        .map_err(|error| GraphError::IoError(error.to_string()))?;
 
     Ok(())
 }

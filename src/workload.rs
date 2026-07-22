@@ -1,12 +1,13 @@
 use crate::Graph;
+use crate::error::{GraphError, Result};
 
-pub fn build_uniform_graph(user_count: u64, edges_per_user: u64) -> Result<Graph, String> {
+pub fn build_uniform_graph(user_count: u64, edges_per_user: u64) -> Result<Graph> {
     if user_count == 0 {
-        return Err("User count must be greater than zero".to_string());
+        return Err(GraphError::ZeroUserCount);
     }
 
     if edges_per_user >= user_count {
-        return Err("Edges per user must be smaller than user count".to_string());
+        return Err(GraphError::EdgesPerUserTooLarge);
     }
 
     let mut graph = Graph::new();
@@ -47,27 +48,27 @@ pub fn generate_community_workload(
     edges_per_user: u64,
     local_edges_per_user: u64,
     seed: u64,
-) -> Result<CommunityWorkload, String> {
+) -> Result<CommunityWorkload> {
     if user_count == 0 {
-        return Err("User count must be greater than zero".to_string());
+        return Err(GraphError::ZeroUserCount);
     }
 
     if community_count == 0 {
-        return Err("Community count must be greater than zero".to_string());
+        return Err(GraphError::EmptyCommunities);
     }
 
-    if user_count % community_count != 0 {
-        return Err("User count must divide evenly into communities".to_string());
+    if !user_count.is_multiple_of(community_count) {
+        return Err(GraphError::UserCountNotDivisible);
     }
 
     if local_edges_per_user > edges_per_user {
-        return Err("Local edges cannot exceed total edges".to_string());
+        return Err(GraphError::LocalEdgesExceedTotal);
     }
 
     let community_size = user_count / community_count;
 
     if local_edges_per_user >= community_size {
-        return Err("Too many local edges for the community size".to_string());
+        return Err(GraphError::LocalEdgesExceedCommunitySize);
     }
 
     let cross_edges_per_user = edges_per_user - local_edges_per_user;
@@ -75,7 +76,7 @@ pub fn generate_community_workload(
     let users_outside_community = user_count - community_size;
 
     if cross_edges_per_user > users_outside_community {
-        return Err("Too many cross-community edges requested".to_string());
+        return Err(GraphError::CrossEdgesExceedExternal);
     }
 
     let mut rng = StdRng::seed_from_u64(seed);
@@ -130,31 +131,31 @@ pub fn generate_hub_workload(
     edges_per_user: u64,
     hub_edges_per_user: u64,
     seed: u64,
-) -> Result<HubWorkload, String> {
+) -> Result<HubWorkload> {
     if user_count == 0 {
-        return Err("User count must be greater than zero".to_string());
+        return Err(GraphError::ZeroUserCount);
     }
 
     if hub_count == 0 {
-        return Err("Hub count must be greater than zero".to_string());
+        return Err(GraphError::ZeroHubCount);
     }
 
     if hub_count >= user_count {
-        return Err("Hub count must be smaller than user count".to_string());
+        return Err(GraphError::HubCountTooLarge);
     }
 
     if edges_per_user >= user_count {
-        return Err("Edges per user must be smaller than user count".to_string());
+        return Err(GraphError::EdgesPerUserTooLarge);
     }
 
     if hub_edges_per_user > edges_per_user {
-        return Err("Hub edges cannot exceed total edges".to_string());
+        return Err(GraphError::HubEdgesExceedTotal);
     }
 
     // Hub users cannot follow themselves, so a hub has only
     // hub_count - 1 possible hub targets.
     if hub_edges_per_user >= hub_count {
-        return Err("Too many hub edges requested".to_string());
+        return Err(GraphError::TooManyHubEdges);
     }
 
     let regular_edges_per_user = edges_per_user - hub_edges_per_user;
@@ -163,7 +164,7 @@ pub fn generate_hub_workload(
     // A normal user cannot follow itself, so it has at most
     // regular_user_count - 1 distinct normal targets.
     if regular_edges_per_user >= regular_user_count {
-        return Err("Too many regular edges requested".to_string());
+        return Err(GraphError::TooManyRegularEdges);
     }
 
     let hub_ids: Vec<u64> = (1..=hub_count).collect();

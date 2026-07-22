@@ -2,6 +2,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::mem::size_of;
 use std::sync::Arc;
 
+use crate::error::{GraphError, Result};
+
 /// A lightweight LRU simulator.
 ///
 /// This stores only user IDs and is used by the existing
@@ -13,9 +15,9 @@ pub struct IdLruSimulator {
 }
 
 impl IdLruSimulator {
-    pub fn new(capacity: usize) -> Result<Self, String> {
+    pub fn new(capacity: usize) -> Result<Self> {
         if capacity == 0 {
-            return Err("Cache capacity must be greater than zero".to_string());
+            return Err(GraphError::ZeroCacheCapacity);
         }
 
         Ok(Self {
@@ -122,19 +124,19 @@ pub struct AdjacencyLruCache {
 }
 
 impl AdjacencyLruCache {
-    pub fn new(capacity: usize) -> Result<Self, String> {
+    pub fn new(capacity: usize) -> Result<Self> {
         Self::build(capacity, None, EvictionPolicy::Lru)
     }
 
-    pub fn new_with_byte_capacity(capacity: usize, byte_capacity: usize) -> Result<Self, String> {
+    pub fn new_with_byte_capacity(capacity: usize, byte_capacity: usize) -> Result<Self> {
         if byte_capacity == 0 {
-            return Err("Cache byte capacity must be greater than zero".to_string());
+            return Err(GraphError::ZeroByteCapacity);
         }
 
         Self::build(capacity, Some(byte_capacity), EvictionPolicy::Lru)
     }
 
-    pub fn new_with_policy(capacity: usize, policy: EvictionPolicy) -> Result<Self, String> {
+    pub fn new_with_policy(capacity: usize, policy: EvictionPolicy) -> Result<Self> {
         Self::build(capacity, None, policy)
     }
 
@@ -142,9 +144,9 @@ impl AdjacencyLruCache {
         capacity: usize,
         byte_capacity: usize,
         policy: EvictionPolicy,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         if byte_capacity == 0 {
-            return Err("Cache byte capacity must be greater than zero".to_string());
+            return Err(GraphError::ZeroByteCapacity);
         }
 
         Self::build(capacity, Some(byte_capacity), policy)
@@ -154,9 +156,9 @@ impl AdjacencyLruCache {
         capacity: usize,
         byte_capacity: Option<usize>,
         policy: EvictionPolicy,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         if capacity == 0 {
-            return Err("Cache capacity must be greater than zero".to_string());
+            return Err(GraphError::ZeroCacheCapacity);
         }
 
         Ok(Self {
@@ -396,10 +398,12 @@ impl AdjacencyLruCache {
             self.remove_node(index);
         }
 
-        if let Some(byte_capacity) = self.byte_capacity {
-            if estimated_size_bytes > byte_capacity {
-                return adjacency_list;
-            }
+        // An individual entry larger than the total limit cannot be cached.
+        if let Some(byte_capacity) = self.byte_capacity
+            && estimated_size_bytes > byte_capacity
+        {
+            return adjacency_list;
+        }
         }
 
         while self.locations.len() >= self.capacity

@@ -1,4 +1,5 @@
 use crate::cache::{AdjacencyLruCache, EvictionPolicy};
+use crate::error::{GraphError, Result};
 use std::collections::{BTreeMap, HashSet};
 
 use crate::{Graph, User, balanced::assign_communities_balanced};
@@ -64,25 +65,22 @@ pub struct ShardedGraph {
 }
 
 impl ShardedGraph {
-    pub fn new(shard_count: usize) -> Result<Self, String> {
+    pub fn new(shard_count: usize) -> Result<Self> {
         Self::with_placement(shard_count, Placement::Hash)
     }
 
-    pub fn warm_cache_for_user(&mut self, user_id: u64) -> Result<(), String> {
+    pub fn warm_cache_for_user(&mut self, user_id: u64) -> Result<()> {
         let shard_id = self
             .try_shard_for(user_id)
-            .ok_or_else(|| format!("Cannot find shard for user {user_id}"))?;
+            .ok_or(GraphError::ShardNotFound(user_id))?;
 
         if self.shards[shard_id].get_user(user_id).is_none() {
-            return Err(format!("User {user_id} does not exist"));
+            return Err(GraphError::UserNotFound(user_id));
         }
 
         let adjacency_list = self.shards[shard_id].get_following_ids(user_id).to_vec();
 
-        let caches = self
-            .caches
-            .as_mut()
-            .ok_or_else(|| "Caching is disabled for this ShardedGraph".to_string())?;
+        let caches = self.caches.as_mut().ok_or(GraphError::CachingDisabled)?;
 
         caches[shard_id].insert(user_id, adjacency_list);
 
@@ -109,15 +107,15 @@ impl ShardedGraph {
     pub fn warm_cache_from_observed_traffic(
         &mut self,
         max_entries_per_shard: usize,
-    ) -> Result<usize, String> {
+    ) -> Result<usize> {
         if max_entries_per_shard == 0 {
-            return Err("Warm entry limit must be greater than zero".to_string());
+            return Err(GraphError::WarmEntryLimitZero);
         }
 
         let cache_limits: Vec<usize> = self
             .caches
             .as_ref()
-            .ok_or_else(|| "Caching is disabled for this ShardedGraph".to_string())?
+            .ok_or(GraphError::CachingDisabled)?
             .iter()
             .map(|cache| cache.capacity().min(max_entries_per_shard))
             .collect();
@@ -131,7 +129,7 @@ impl ShardedGraph {
         */
         let mut warm_plan = Vec::with_capacity(self.shards.len());
 
-        for shard_id in 0..self.shards.len() {
+        for (shard_id, cache_limit) in cache_limits.iter().enumerate().take(self.shards.len()) {
             let mut ranked_users: Vec<(u64, u64)> = self.observed_adjacency_accesses[shard_id]
                 .iter()
                 .map(|(&user_id, &access_count)| (user_id, access_count))
@@ -145,7 +143,7 @@ impl ShardedGraph {
 
             let mut selected_entries: Vec<(u64, Vec<u64>)> = ranked_users
                 .into_iter()
-                .take(cache_limits[shard_id])
+                .take(*cache_limit)
                 .map(|(user_id, _)| {
                     let adjacency_list = self.shards[shard_id].get_following_ids(user_id).to_vec();
 
@@ -181,10 +179,7 @@ impl ShardedGraph {
         Ok(warmed_entry_count)
     }
 
-    pub fn new_with_cache(
-        shard_count: usize,
-        cache_capacity_per_shard: usize,
-    ) -> Result<Self, String> {
+    pub fn new_with_cache(shard_count: usize, cache_capacity_per_shard: usize) -> Result<Self> {
         Self::with_placement_and_cache(shard_count, Placement::Hash, cache_capacity_per_shard)
     }
 
@@ -192,7 +187,7 @@ impl ShardedGraph {
         shard_count: usize,
         cache_capacity_per_shard: usize,
         cache_byte_capacity_per_shard: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         Self::with_placement_and_byte_bounded_cache(
             shard_count,
             Placement::Hash,
@@ -205,7 +200,7 @@ impl ShardedGraph {
         shard_count: usize,
         cache_capacity_per_shard: usize,
         policy: EvictionPolicy,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         Self::with_placement_and_cache_policy(
             shard_count,
             Placement::Hash,
@@ -219,7 +214,7 @@ impl ShardedGraph {
         cache_capacity_per_shard: usize,
         cache_byte_capacity_per_shard: usize,
         policy: EvictionPolicy,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         Self::with_placement_and_policy_and_byte_bounded_cache(
             shard_count,
             Placement::Hash,
@@ -234,7 +229,7 @@ impl ShardedGraph {
         placement: Placement,
         cache_capacity_per_shard: usize,
         policy: EvictionPolicy,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let mut graph = Self::with_placement(shard_count, placement)?;
 
         let mut caches = Vec::with_capacity(shard_count);
@@ -257,7 +252,7 @@ impl ShardedGraph {
         cache_capacity_per_shard: usize,
         cache_byte_capacity_per_shard: usize,
         policy: EvictionPolicy,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let mut graph = Self::with_placement(shard_count, placement)?;
 
         let mut caches = Vec::with_capacity(shard_count);
@@ -282,7 +277,7 @@ impl ShardedGraph {
     pub fn with_balanced_communities(
         shard_count: usize,
         community_sizes: Vec<u64>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let assignment = assign_communities_balanced(&community_sizes, shard_count)?;
 
         Self::with_placement(
@@ -294,9 +289,9 @@ impl ShardedGraph {
         )
     }
 
-    pub fn with_placement(shard_count: usize, placement: Placement) -> Result<Self, String> {
+    pub fn with_placement(shard_count: usize, placement: Placement) -> Result<Self> {
         if shard_count == 0 {
-            return Err("Shard count must be greater than zero".to_string());
+            return Err(GraphError::ZeroShardCount);
         }
 
         match &placement {
@@ -304,7 +299,7 @@ impl ShardedGraph {
 
             Placement::Community { community_size } => {
                 if *community_size == 0 {
-                    return Err("Community size must be greater than zero".to_string());
+                    return Err(GraphError::ZeroCommunitySize);
                 }
             }
 
@@ -313,28 +308,28 @@ impl ShardedGraph {
                 community_to_shard,
             } => {
                 if community_sizes.is_empty() {
-                    return Err("At least one community is required".to_string());
+                    return Err(GraphError::EmptyCommunities);
                 }
 
                 if community_sizes.contains(&0) {
-                    return Err("Community sizes must be greater than zero".to_string());
+                    return Err(GraphError::ZeroCommunitySizes);
                 }
 
                 if community_sizes.len() != community_to_shard.len() {
-                    return Err("Every community must have a shard assignment".to_string());
+                    return Err(GraphError::CommunitySizeMismatch);
                 }
 
                 if community_to_shard
                     .iter()
                     .any(|shard_id| *shard_id >= shard_count)
                 {
-                    return Err("Community assignment contains an invalid shard".to_string());
+                    return Err(GraphError::InvalidShardInAssignment);
                 }
 
                 community_sizes
                     .iter()
                     .try_fold(0_u64, |total, size| total.checked_add(*size))
-                    .ok_or_else(|| "Total community size is too large".to_string())?;
+                    .ok_or(GraphError::CommunitySizeOverflow)?;
             }
         }
 
@@ -355,7 +350,7 @@ impl ShardedGraph {
         shard_count: usize,
         placement: Placement,
         cache_capacity_per_shard: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let mut graph = Self::with_placement(shard_count, placement)?;
 
         let mut caches = Vec::with_capacity(shard_count);
@@ -374,7 +369,7 @@ impl ShardedGraph {
         placement: Placement,
         cache_capacity_per_shard: usize,
         cache_byte_capacity_per_shard: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let mut graph = Self::with_placement(shard_count, placement)?;
 
         let mut caches = Vec::with_capacity(shard_count);
@@ -432,30 +427,30 @@ impl ShardedGraph {
         self.shard_for(user_id)
     }
 
-    pub fn add_user(&mut self, id: u64, name: &str) -> Result<(), String> {
+    pub fn add_user(&mut self, id: u64, name: &str) -> Result<()> {
         if id == 0 {
-            return Err("User ID must be greater than zero".to_string());
+            return Err(GraphError::ZeroShardCount);
         }
 
         let shard_id = self
             .try_shard_for(id)
-            .ok_or_else(|| format!("User {id} is outside the configured community ranges"))?;
+            .ok_or(GraphError::OutsideCommunityRange(id))?;
 
         self.shards[shard_id].add_user(id, name)
     }
 
-    pub fn add_follow(&mut self, source: u64, target: u64) -> Result<(), String> {
+    pub fn add_follow(&mut self, source: u64, target: u64) -> Result<()> {
         if self.get_user(source).is_none() {
-            return Err(format!("Source user {source} does not exist"));
+            return Err(GraphError::SourceUserNotFound(source));
         }
 
         if self.get_user(target).is_none() {
-            return Err(format!("Target user {target} does not exist"));
+            return Err(GraphError::TargetUserNotFound(target));
         }
 
         let source_shard = self
             .try_shard_for(source)
-            .ok_or_else(|| format!("Cannot find shard for user {source}"))?;
+            .ok_or(GraphError::ShardNotFound(source))?;
 
         let edge_already_exists = self.shards[source_shard]
             .get_following_ids(source)
@@ -470,18 +465,18 @@ impl ShardedGraph {
         Ok(())
     }
 
-    pub fn remove_follow(&mut self, source: u64, target: u64) -> Result<bool, String> {
+    pub fn remove_follow(&mut self, source: u64, target: u64) -> Result<bool> {
         if self.get_user(source).is_none() {
-            return Err(format!("Source user {source} does not exist"));
+            return Err(GraphError::SourceUserNotFound(source));
         }
 
         if self.get_user(target).is_none() {
-            return Err(format!("Target user {target} does not exist"));
+            return Err(GraphError::TargetUserNotFound(target));
         }
 
         let source_shard = self
             .try_shard_for(source)
-            .ok_or_else(|| format!("Cannot find shard for user {source}"))?;
+            .ok_or(GraphError::ShardNotFound(source))?;
 
         let removed = self.shards[source_shard].remove_follow_unchecked(source, target)?;
 
@@ -574,12 +569,9 @@ impl ShardedGraph {
         }
     }
 
-    pub fn get_two_hop_with_cache_stats(
-        &mut self,
-        source: u64,
-    ) -> Result<CachedQueryResult, String> {
+    pub fn get_two_hop_with_cache_stats(&mut self, source: u64) -> Result<CachedQueryResult> {
         if self.caches.is_none() {
-            return Err("Caching is disabled for this ShardedGraph".to_string());
+            return Err(GraphError::CachingDisabled);
         }
 
         let Some(source_shard) = self.try_shard_for(source) else {

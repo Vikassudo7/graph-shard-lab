@@ -7,6 +7,7 @@ use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 use crate::Graph;
+use crate::error::{GraphError, Result};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct DistributedQueryResult {
@@ -18,13 +19,13 @@ enum ShardCommand {
     AddUser {
         id: u64,
         name: String,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<()>>,
     },
 
     AddFollow {
         source: u64,
         target: u64,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<()>>,
     },
 
     GetFollowing {
@@ -45,7 +46,7 @@ struct ShardHandle {
 }
 
 impl ShardHandle {
-    async fn add_user(&self, id: u64, name: String) -> Result<(), String> {
+    async fn add_user(&self, id: u64, name: String) -> Result<()> {
         let (reply_sender, reply_receiver) = oneshot::channel();
 
         self.sender
@@ -55,17 +56,14 @@ impl ShardHandle {
                 reply: reply_sender,
             })
             .await
-            .map_err(|_| format!("Shard worker {} has stopped", self.shard_id))?;
+            .map_err(|_| GraphError::WorkerStopped(self.shard_id))?;
 
-        reply_receiver.await.map_err(|_| {
-            format!(
-                "Shard worker {} dropped the add-user response",
-                self.shard_id
-            )
-        })?
+        reply_receiver
+            .await
+            .map_err(|_| GraphError::WorkerDropped(self.shard_id, "add-user"))?
     }
 
-    async fn add_follow(&self, source: u64, target: u64) -> Result<(), String> {
+    async fn add_follow(&self, source: u64, target: u64) -> Result<()> {
         let (reply_sender, reply_receiver) = oneshot::channel();
 
         self.sender
@@ -75,17 +73,14 @@ impl ShardHandle {
                 reply: reply_sender,
             })
             .await
-            .map_err(|_| format!("Shard worker {} has stopped", self.shard_id))?;
+            .map_err(|_| GraphError::WorkerStopped(self.shard_id))?;
 
-        reply_receiver.await.map_err(|_| {
-            format!(
-                "Shard worker {} dropped the add-follow response",
-                self.shard_id
-            )
-        })?
+        reply_receiver
+            .await
+            .map_err(|_| GraphError::WorkerDropped(self.shard_id, "add-follow"))?
     }
 
-    async fn get_following(&self, source: u64) -> Result<Vec<u64>, String> {
+    async fn get_following(&self, source: u64) -> Result<Vec<u64>> {
         let (reply_sender, reply_receiver) = oneshot::channel();
 
         self.sender
@@ -94,16 +89,14 @@ impl ShardHandle {
                 reply: reply_sender,
             })
             .await
-            .map_err(|_| format!("Shard worker {} has stopped", self.shard_id))?;
+            .map_err(|_| GraphError::WorkerStopped(self.shard_id))?;
 
-        reply_receiver.await.map_err(|_| {
-            format!(
-                "Shard worker {} dropped the adjacency response",
-                self.shard_id
-            )
-        })
+        reply_receiver
+            .await
+            .map_err(|_| GraphError::WorkerDropped(self.shard_id, "adjacency"))
     }
-    async fn get_following_batch(&self, sources: Vec<u64>) -> Result<Vec<(u64, Vec<u64>)>, String> {
+
+    async fn get_following_batch(&self, sources: Vec<u64>) -> Result<Vec<(u64, Vec<u64>)>> {
         let (reply_sender, reply_receiver) = oneshot::channel();
 
         self.sender
@@ -112,13 +105,14 @@ impl ShardHandle {
                 reply: reply_sender,
             })
             .await
-            .map_err(|_| format!("Shard worker {} has stopped", self.shard_id))?;
+            .map_err(|_| GraphError::WorkerStopped(self.shard_id))?;
 
         reply_receiver
             .await
-            .map_err(|_| format!("Shard worker {} dropped the batch response", self.shard_id))
+            .map_err(|_| GraphError::WorkerDropped(self.shard_id, "batch"))
     }
 }
+
 fn spawn_shard_worker(
     shard_id: usize,
     channel_capacity: usize,
@@ -196,7 +190,7 @@ pub struct DistributedShardedGraph {
 }
 
 impl DistributedShardedGraph {
-    pub fn new(shard_count: usize, channel_capacity: usize) -> Result<Self, String> {
+    pub fn new(shard_count: usize, channel_capacity: usize) -> Result<Self> {
         Self::new_with_read_delay(shard_count, channel_capacity, Duration::ZERO)
     }
 
@@ -204,13 +198,13 @@ impl DistributedShardedGraph {
         shard_count: usize,
         channel_capacity: usize,
         simulated_read_delay: Duration,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         if shard_count == 0 {
-            return Err("Shard count must be greater than zero".to_string());
+            return Err(GraphError::ZeroShardCount);
         }
 
         if channel_capacity == 0 {
-            return Err("Channel capacity must be greater than zero".to_string());
+            return Err(GraphError::InvalidWorkerConfig);
         }
 
         let workers = (0..shard_count)
@@ -222,6 +216,7 @@ impl DistributedShardedGraph {
             users: HashSet::new(),
         })
     }
+
     pub fn shard_count(&self) -> usize {
         self.workers.len()
     }
@@ -234,18 +229,16 @@ impl DistributedShardedGraph {
         Some(user_id as usize % self.workers.len())
     }
 
-    pub async fn add_user(&mut self, id: u64, name: &str) -> Result<(), String> {
+    pub async fn add_user(&mut self, id: u64, name: &str) -> Result<()> {
         if id == 0 {
-            return Err("User ID must be greater than zero".to_string());
+            return Err(GraphError::ZeroShardCount);
         }
 
         if self.users.contains(&id) {
-            return Err(format!("User {id} already exists"));
+            return Err(GraphError::DuplicateUser(id));
         }
 
-        let shard_id = self
-            .shard_for(id)
-            .ok_or_else(|| format!("Cannot find shard for user {id}"))?;
+        let shard_id = self.shard_for(id).ok_or(GraphError::ShardNotFound(id))?;
 
         self.workers[shard_id]
             .add_user(id, name.to_string())
@@ -256,35 +249,35 @@ impl DistributedShardedGraph {
         Ok(())
     }
 
-    pub async fn add_follow(&self, source: u64, target: u64) -> Result<(), String> {
+    pub async fn add_follow(&self, source: u64, target: u64) -> Result<()> {
         if !self.users.contains(&source) {
-            return Err(format!("Source user {source} does not exist"));
+            return Err(GraphError::SourceUserNotFound(source));
         }
 
         if !self.users.contains(&target) {
-            return Err(format!("Target user {target} does not exist"));
+            return Err(GraphError::TargetUserNotFound(target));
         }
 
         let source_shard = self
             .shard_for(source)
-            .ok_or_else(|| format!("Cannot find shard for user {source}"))?;
+            .ok_or(GraphError::ShardNotFound(source))?;
 
         self.workers[source_shard].add_follow(source, target).await
     }
 
-    pub async fn get_following_ids(&self, source: u64) -> Result<Vec<u64>, String> {
+    pub async fn get_following_ids(&self, source: u64) -> Result<Vec<u64>> {
         if !self.users.contains(&source) {
-            return Err(format!("User {source} does not exist"));
+            return Err(GraphError::UserNotFound(source));
         }
 
         let shard_id = self
             .shard_for(source)
-            .ok_or_else(|| format!("Cannot find shard for user {source}"))?;
+            .ok_or(GraphError::ShardNotFound(source))?;
 
         self.workers[shard_id].get_following(source).await
     }
 
-    pub async fn get_two_hop(&self, source: u64) -> Result<DistributedQueryResult, String> {
+    pub async fn get_two_hop(&self, source: u64) -> Result<DistributedQueryResult> {
         let first_hops = self.get_following_ids(source).await?;
 
         let mut user_ids = Vec::new();
@@ -313,7 +306,7 @@ impl DistributedShardedGraph {
         })
     }
 
-    pub async fn get_two_hop_batched(&self, source: u64) -> Result<DistributedQueryResult, String> {
+    pub async fn get_two_hop_batched(&self, source: u64) -> Result<DistributedQueryResult> {
         let first_hops = self.get_following_ids(source).await?;
 
         /*
@@ -326,7 +319,7 @@ impl DistributedShardedGraph {
         for first_hop in first_hops {
             let shard_id = self
                 .shard_for(first_hop)
-                .ok_or_else(|| format!("Cannot find shard for user {first_hop}"))?;
+                .ok_or(GraphError::ShardNotFound(first_hop))?;
 
             batches.entry(shard_id).or_default().push(first_hop);
         }
@@ -349,13 +342,13 @@ impl DistributedShardedGraph {
             pending_batches.spawn(async move {
                 let adjacency_lists = worker.get_following_batch(sources).await?;
 
-                Ok::<_, String>((shard_id, adjacency_lists))
+                Ok::<_, GraphError>((shard_id, adjacency_lists))
             });
         }
 
         while let Some(joined_batch) = pending_batches.join_next().await {
             let (_shard_id, adjacency_lists) =
-                joined_batch.map_err(|error| format!("Shard batch task failed: {error}"))??;
+                joined_batch.map_err(|error| GraphError::IoError(error.to_string()))??;
 
             for (_first_hop, second_hops) in adjacency_lists {
                 for second_hop in second_hops {

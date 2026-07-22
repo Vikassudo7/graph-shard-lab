@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
+use crate::error::{GraphError, Result};
 use crate::workload::CommunityWorkload;
 
 pub fn generate_uneven_community_workload(
@@ -9,23 +10,23 @@ pub fn generate_uneven_community_workload(
     edges_per_user: u64,
     local_edges_per_user: u64,
     seed: u64,
-) -> Result<CommunityWorkload, String> {
+) -> Result<CommunityWorkload> {
     if community_sizes.is_empty() {
-        return Err("At least one community is required".to_string());
+        return Err(GraphError::EmptyCommunities);
     }
 
     if community_sizes.contains(&0) {
-        return Err("Community sizes must be greater than zero".to_string());
+        return Err(GraphError::ZeroCommunitySizes);
     }
 
     if local_edges_per_user > edges_per_user {
-        return Err("Local edges cannot exceed total edges per user".to_string());
+        return Err(GraphError::LocalEdgesExceedTotal);
     }
 
     let user_count = community_sizes
         .iter()
         .try_fold(0_u64, |total, size| total.checked_add(*size))
-        .ok_or_else(|| "Total user count is too large".to_string())?;
+        .ok_or(GraphError::CommunitySizeOverflow)?;
 
     let external_edges_per_user = edges_per_user - local_edges_per_user;
 
@@ -35,17 +36,17 @@ pub fn generate_uneven_community_workload(
         let possible_external_targets = user_count - community_size;
 
         if local_edges_per_user > possible_local_targets {
-            return Err(format!(
+            return Err(GraphError::CommunityTargetCountMismatch(format!(
                 "A community of size {community_size} cannot provide \
                  {local_edges_per_user} unique local targets per user"
-            ));
+            )));
         }
 
         if external_edges_per_user > possible_external_targets {
-            return Err(format!(
+            return Err(GraphError::CommunityTargetCountMismatch(format!(
                 "A community of size {community_size} cannot provide \
                  {external_edges_per_user} unique external targets per user"
-            ));
+            )));
         }
     }
 

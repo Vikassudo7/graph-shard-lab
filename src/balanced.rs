@@ -1,3 +1,5 @@
+use crate::error::{GraphError, Result};
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct BalancedAssignment {
     // Index = community ID, value = assigned shard ID.
@@ -10,17 +12,17 @@ pub struct BalancedAssignment {
 pub fn assign_communities_balanced(
     community_sizes: &[u64],
     shard_count: usize,
-) -> Result<BalancedAssignment, String> {
+) -> Result<BalancedAssignment> {
     if shard_count == 0 {
-        return Err("Shard count must be greater than zero".to_string());
+        return Err(GraphError::ZeroShardCount);
     }
 
     if community_sizes.is_empty() {
-        return Err("At least one community is required".to_string());
+        return Err(GraphError::EmptyCommunities);
     }
 
     if community_sizes.contains(&0) {
-        return Err("Community sizes must be greater than zero".to_string());
+        return Err(GraphError::ZeroCommunitySizes);
     }
 
     /*

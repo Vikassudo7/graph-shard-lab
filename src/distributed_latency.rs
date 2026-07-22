@@ -3,6 +3,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::distributed::DistributedShardedGraph;
+use crate::error::{GraphError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LatencySummary {
@@ -26,9 +27,9 @@ fn nearest_rank(sorted_samples: &[Duration], percentile: usize) -> Duration {
     sorted_samples[rank.saturating_sub(1)]
 }
 
-pub fn summarize_latencies(samples: &[Duration]) -> Result<LatencySummary, String> {
+pub fn summarize_latencies(samples: &[Duration]) -> Result<LatencySummary> {
     if samples.is_empty() {
-        return Err("At least one latency sample is required".to_string());
+        return Err(GraphError::EmptyLatencySamples);
     }
 
     let mut sorted_samples = samples.to_vec();
@@ -46,19 +47,19 @@ pub async fn benchmark_two_hop_latencies(
     graph: &DistributedShardedGraph,
     sources: &[u64],
     repetitions: usize,
-) -> Result<DistributedLatencyComparison, String> {
+) -> Result<DistributedLatencyComparison> {
     if sources.is_empty() {
-        return Err("At least one query source is required".to_string());
+        return Err(GraphError::EmptyLatencySamples);
     }
 
     if repetitions == 0 {
-        return Err("Benchmark repetitions must be greater than zero".to_string());
+        return Err(GraphError::ZeroRepetitions);
     }
 
     let sample_capacity = sources
         .len()
         .checked_mul(repetitions)
-        .ok_or_else(|| "Latency sample count is too large".to_string())?;
+        .ok_or(GraphError::LatencySampleCountOverflow)?;
 
     let mut direct_samples = Vec::with_capacity(sample_capacity);
 

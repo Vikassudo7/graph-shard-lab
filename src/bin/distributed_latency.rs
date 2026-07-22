@@ -3,6 +3,7 @@ use std::{fs, path::Path, time::Duration};
 use graph_shard_lab::{
     distributed::DistributedShardedGraph,
     distributed_latency::{DistributedLatencyComparison, benchmark_two_hop_latencies},
+    error::{GraphError, Result},
 };
 
 const SHARD_COUNT: usize = 4;
@@ -25,10 +26,9 @@ fn reduction_percent(direct: Duration, batched: Duration) -> f64 {
     ((direct_seconds - batched.as_secs_f64()) / direct_seconds) * 100.0
 }
 
-fn write_results(path: &str, comparison: DistributedLatencyComparison) -> Result<(), String> {
+fn write_results(path: &str, comparison: DistributedLatencyComparison) -> Result<()> {
     if let Some(parent) = Path::new(path).parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create results directory: {error}"))?;
+        fs::create_dir_all(parent).map_err(|error| GraphError::IoError(error.to_string()))?;
     }
 
     let csv = format!(
@@ -47,11 +47,11 @@ fn write_results(path: &str, comparison: DistributedLatencyComparison) -> Result
         duration_micros(comparison.batched.p99),
     );
 
-    fs::write(path, csv).map_err(|error| format!("Failed to write {path}: {error}"))
+    fs::write(path, csv).map_err(|error| GraphError::IoError(error.to_string()))
 }
 
 #[tokio::main]
-async fn main() -> Result<(), String> {
+async fn main() -> Result<()> {
     let mut graph = DistributedShardedGraph::new_with_read_delay(
         SHARD_COUNT,
         CHANNEL_CAPACITY,

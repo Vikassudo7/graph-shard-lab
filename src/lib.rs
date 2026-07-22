@@ -2,9 +2,12 @@ pub mod balanced;
 pub mod cache;
 pub mod distributed;
 pub mod distributed_latency;
+pub mod error;
 pub mod sharded;
 pub mod uneven;
 pub mod workload;
+
+pub use error::{GraphError, Result};
 
 use cache::AdjacencyLruCache;
 use std::collections::{HashMap, HashSet};
@@ -36,9 +39,9 @@ impl Graph {
         }
     }
 
-    pub fn add_user(&mut self, id: u64, name: &str) -> Result<(), String> {
+    pub fn add_user(&mut self, id: u64, name: &str) -> Result<()> {
         if self.users.contains_key(&id) {
-            return Err(format!("User {id} already exists"));
+            return Err(GraphError::DuplicateUser(id));
         }
 
         self.users.insert(
@@ -52,21 +55,21 @@ impl Graph {
         Ok(())
     }
 
-    pub fn add_follow(&mut self, source: u64, target: u64) -> Result<(), String> {
+    pub fn add_follow(&mut self, source: u64, target: u64) -> Result<()> {
         if !self.users.contains_key(&source) {
-            return Err(format!("Source user {source} does not exist"));
+            return Err(GraphError::SourceUserNotFound(source));
         }
 
         if !self.users.contains_key(&target) {
-            return Err(format!("Target user {target} does not exist"));
+            return Err(GraphError::TargetUserNotFound(target));
         }
 
         self.add_follow_unchecked(source, target)
     }
 
-    pub(crate) fn add_follow_unchecked(&mut self, source: u64, target: u64) -> Result<(), String> {
+    pub(crate) fn add_follow_unchecked(&mut self, source: u64, target: u64) -> Result<()> {
         if !self.users.contains_key(&source) {
-            return Err(format!("Source user {source} does not exist"));
+            return Err(GraphError::SourceUserNotFound(source));
         }
 
         let targets = self.follows.entry(source).or_default();
@@ -78,25 +81,21 @@ impl Graph {
         Ok(())
     }
 
-    pub fn remove_follow(&mut self, source: u64, target: u64) -> Result<bool, String> {
+    pub fn remove_follow(&mut self, source: u64, target: u64) -> Result<bool> {
         if !self.users.contains_key(&source) {
-            return Err(format!("Source user {source} does not exist"));
+            return Err(GraphError::SourceUserNotFound(source));
         }
 
         if !self.users.contains_key(&target) {
-            return Err(format!("Target user {target} does not exist"));
+            return Err(GraphError::TargetUserNotFound(target));
         }
 
         self.remove_follow_unchecked(source, target)
     }
 
-    pub(crate) fn remove_follow_unchecked(
-        &mut self,
-        source: u64,
-        target: u64,
-    ) -> Result<bool, String> {
+    pub(crate) fn remove_follow_unchecked(&mut self, source: u64, target: u64) -> Result<bool> {
         if !self.users.contains_key(&source) {
-            return Err(format!("Source user {source} does not exist"));
+            return Err(GraphError::SourceUserNotFound(source));
         }
 
         let Some(targets) = self.follows.get_mut(&source) else {
