@@ -1,6 +1,10 @@
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
+use tokio::time::sleep;
 
 use crate::Graph;
 
@@ -115,8 +119,11 @@ impl ShardHandle {
             .map_err(|_| format!("Shard worker {} dropped the batch response", self.shard_id))
     }
 }
-
-fn spawn_shard_worker(shard_id: usize, channel_capacity: usize) -> ShardHandle {
+fn spawn_shard_worker(
+    shard_id: usize,
+    channel_capacity: usize,
+    simulated_read_delay: Duration,
+) -> ShardHandle {
     let (sender, mut receiver) = mpsc::channel::<ShardCommand>(channel_capacity);
 
     tokio::spawn(async move {
@@ -145,12 +152,20 @@ fn spawn_shard_worker(shard_id: usize, channel_capacity: usize) -> ShardHandle {
                 }
 
                 ShardCommand::GetFollowing { source, reply } => {
+                    if !simulated_read_delay.is_zero() {
+                        sleep(simulated_read_delay).await;
+                    }
+
                     let adjacency_list = graph.get_following_ids(source).to_vec();
 
                     let _ = reply.send(adjacency_list);
                 }
 
                 ShardCommand::BatchGetFollowing { sources, reply } => {
+                    if !simulated_read_delay.is_zero() {
+                        sleep(simulated_read_delay).await;
+                    }
+
                     let adjacency_lists = sources
                         .into_iter()
                         .map(|source| {
@@ -182,6 +197,14 @@ pub struct DistributedShardedGraph {
 
 impl DistributedShardedGraph {
     pub fn new(shard_count: usize, channel_capacity: usize) -> Result<Self, String> {
+        Self::new_with_read_delay(shard_count, channel_capacity, Duration::ZERO)
+    }
+
+    pub fn new_with_read_delay(
+        shard_count: usize,
+        channel_capacity: usize,
+        simulated_read_delay: Duration,
+    ) -> Result<Self, String> {
         if shard_count == 0 {
             return Err("Shard count must be greater than zero".to_string());
         }
@@ -191,7 +214,7 @@ impl DistributedShardedGraph {
         }
 
         let workers = (0..shard_count)
-            .map(|shard_id| spawn_shard_worker(shard_id, channel_capacity))
+            .map(|shard_id| spawn_shard_worker(shard_id, channel_capacity, simulated_read_delay))
             .collect();
 
         Ok(Self {
@@ -199,7 +222,6 @@ impl DistributedShardedGraph {
             users: HashSet::new(),
         })
     }
-
     pub fn shard_count(&self) -> usize {
         self.workers.len()
     }
@@ -380,6 +402,58 @@ mod tests {
         first-hop user: Users 2 and 3.
         */
         assert_eq!(result.shard_requests, 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_batches_pay_one_delay_round() {
+        let delay = Duration::from_millis(50);
+
+        let mut graph = DistributedShardedGraph::new_with_read_delay(4, 32, delay).unwrap();
+
+        for id in 1..=12 {
+            graph.add_user(id, &format!("user-{id}")).await.unwrap();
+        }
+
+        // First-hop users belong to four different shards.
+        graph.add_follow(1, 4).await.unwrap();
+        graph.add_follow(1, 5).await.unwrap();
+        graph.add_follow(1, 6).await.unwrap();
+        graph.add_follow(1, 7).await.unwrap();
+
+        graph.add_follow(4, 8).await.unwrap();
+        graph.add_follow(5, 9).await.unwrap();
+        graph.add_follow(6, 10).await.unwrap();
+        graph.add_follow(7, 11).await.unwrap();
+
+        let direct_start = tokio::time::Instant::now();
+
+        let direct = graph.get_two_hop(1).await.unwrap();
+
+        let direct_elapsed = direct_start.elapsed();
+
+        let batched_start = tokio::time::Instant::now();
+
+        let batched = graph.get_two_hop_batched(1).await.unwrap();
+
+        let batched_elapsed = batched_start.elapsed();
+
+        assert_eq!(direct.user_ids, batched.user_ids);
+
+        /*
+        Direct:
+        1 source request + 4 sequential first-hop requests
+        = 5 delay rounds = 250 ms.
+        */
+        assert_eq!(direct_elapsed, Duration::from_millis(250),);
+
+        /*
+        Batched:
+        1 source request + 1 concurrent batch round
+        = 2 delay rounds = 100 ms.
+        */
+        assert_eq!(batched_elapsed, Duration::from_millis(100),);
+
+        assert!(batched_elapsed < direct_elapsed);
     }
 
     #[tokio::test]
