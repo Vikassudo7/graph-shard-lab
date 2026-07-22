@@ -463,9 +463,14 @@ graph-shard-lab/
 │   ├── cache.rs
 │   ├── distributed.rs
 │   ├── distributed_latency.rs
+│   ├── error.rs
 │   ├── lib.rs
 │   ├── main.rs
+│   ├── persistence.rs
+│   ├── rebalance.rs
+│   ├── replication.rs
 │   ├── sharded.rs
+│   ├── splitting.rs
 │   ├── uneven.rs
 │   └── workload.rs
 ├── tests/
@@ -504,7 +509,84 @@ GraphShard Lab is a research prototype rather than a production distributed data
 - Data is stored in memory.
 - Network behavior is simulated.
 - Workloads are synthetic.
-- Replication and recovery are not implemented.
+
+## Hot-node replication
+
+GraphShard Lab supports replicating hot nodes (hubs) across all shards. When a user is replicated, their adjacency list is stored on every shard, allowing local reads without cross-shard communication.
+
+```rust
+graph.replicate_user(hub_id)?;
+graph.auto_replicate_hubs(&[1, 5, 9])?;
+```
+
+Replicated users receive:
+
+* Identical adjacency lists on every shard
+* Automatic cache population on all shard caches
+* Consistent edge mutations across all replicas
+
+## Oversized-community splitting
+
+When communities exceed a configurable size threshold, GraphShard Lab can split them across multiple shards while keeping related users as close as possible.
+
+```rust
+let plan = plan_community_splitting(&[1000, 200, 300], 4, 400)?;
+let graph = apply_splitting_plan(4, &plan)?;
+```
+
+The splitting algorithm:
+
+* Keeps small communities intact on a single shard
+* Divides large communities into chunks within the size limit
+* Distributes chunks across shards in round-robin order
+
+## Dynamic shard rebalancing
+
+GraphShard Lab can detect imbalance and migrate users between shards to improve distribution.
+
+```rust
+let plan = compute_rebalance_plan(&graph, 10.0)?;
+let stats = apply_rebalance_plan(&mut graph, &plan)?;
+```
+
+The rebalancing algorithm:
+
+* Identifies overloaded shards (above 110% of average)
+* Migrates users with the fewest edges first
+* Stops when imbalance falls below the target threshold
+
+## Persistence
+
+GraphShard Lab supports snapshots, operation logging, and recovery.
+
+### Snapshots
+
+```rust
+let snapshot = create_snapshot(&graph, timestamp);
+save_snapshot(&snapshot, Path::new("snapshot.txt"))?;
+let restored = load_snapshot(Path::new("snapshot.txt"))?;
+```
+
+### Operation log
+
+```rust
+append_operation(&log_path, sequence, &Operation::AddFollow { source, target })?;
+let entries = read_operation_log(&log_path)?;
+```
+
+### Recovery
+
+```rust
+let (graph, stats) = recover_from_snapshot_and_log(&snapshot_path, &log_path)?;
+verify_recovery(&original, &recovered)?;
+```
+
+The persistence system includes:
+
+* Text-based snapshot format with version header
+* Append-only operation log (WAL)
+* Snapshot + log replay for recovery
+* Correctness verification between original and recovered graphs
 
 ## Cache policies
 
@@ -531,10 +613,10 @@ cargo run --release --bin cache_policy_benchmark
 
 ## Future work
 
-* Hot-node replication
-* Oversized-community splitting
-* Dynamic shard rebalancing
-* Persistent snapshots and operation-log recovery
+* Production distributed network transport
+* Persistent storage with crash recovery
+* Dynamic shard rebalancing triggers
+* Cross-datacenter replication
 
 ## Conclusion
 

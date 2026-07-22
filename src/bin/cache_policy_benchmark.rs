@@ -94,13 +94,14 @@ fn build_caches(
 ) -> Result<Vec<AdjacencyLruCache>, String> {
     (0..SHARD_COUNT)
         .map(|_| AdjacencyLruCache::new_with_policy(capacity_per_shard, policy))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 fn warm_hubs(caches: &mut [AdjacencyLruCache]) {
     for user_id in 1..=HUB_COUNT {
         let shard_id = shard_for(user_id);
-        let _ = caches[shard_id].insert(user_id, adjacency_for(user_id));
+        caches[shard_id].insert(user_id, adjacency_for(user_id));
     }
 }
 

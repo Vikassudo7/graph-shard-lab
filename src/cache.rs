@@ -404,7 +404,6 @@ impl AdjacencyLruCache {
         {
             return adjacency_list;
         }
-        }
 
         while self.locations.len() >= self.capacity
             || self.would_exceed_byte_capacity(estimated_size_bytes)

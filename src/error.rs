@@ -42,6 +42,12 @@ pub enum GraphError {
     LocalEdgesExceedCommunitySize,
     CrossEdgesExceedExternal,
     CommunityTargetCountMismatch(String),
+    UserAlreadyReplicated(u64),
+    UserNotReplicated(u64),
+    SnapshotInvalid(String),
+    LogCorrupted(String),
+    RecoveryFailed(String),
+    RebalanceFailed(String),
 }
 
 impl fmt::Display for GraphError {
@@ -131,6 +137,16 @@ impl fmt::Display for GraphError {
                 write!(f, "Too many cross-community edges requested")
             }
             Self::CommunityTargetCountMismatch(msg) => write!(f, "{msg}"),
+            Self::UserAlreadyReplicated(id) => {
+                write!(f, "User {id} is already replicated")
+            }
+            Self::UserNotReplicated(id) => {
+                write!(f, "User {id} is not replicated")
+            }
+            Self::SnapshotInvalid(msg) => write!(f, "Invalid snapshot: {msg}"),
+            Self::LogCorrupted(msg) => write!(f, "Operation log corrupted: {msg}"),
+            Self::RecoveryFailed(msg) => write!(f, "Recovery failed: {msg}"),
+            Self::RebalanceFailed(msg) => write!(f, "Rebalance failed: {msg}"),
         }
     }
 }

@@ -3,7 +3,11 @@ pub mod cache;
 pub mod distributed;
 pub mod distributed_latency;
 pub mod error;
+pub mod persistence;
+pub mod rebalance;
+pub mod replication;
 pub mod sharded;
+pub mod splitting;
 pub mod uneven;
 pub mod workload;
 

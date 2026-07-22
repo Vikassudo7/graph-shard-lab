@@ -52,9 +52,9 @@ pub struct CachedQueryResult {
 }
 
 pub struct ShardedGraph {
-    shards: Vec<Graph>,
+    pub(crate) shards: Vec<Graph>,
 
-    caches: Option<Vec<AdjacencyLruCache>>,
+    pub(crate) caches: Option<Vec<AdjacencyLruCache>>,
 
     // One access-frequency map per logical shard.
     //
@@ -62,6 +62,8 @@ pub struct ShardedGraph {
     observed_adjacency_accesses: Vec<std::collections::HashMap<u64, u64>>,
 
     placement: Placement,
+
+    pub(crate) replicated_users: HashSet<u64>,
 }
 
 impl ShardedGraph {
@@ -344,6 +346,7 @@ impl ShardedGraph {
             caches: None,
             observed_adjacency_accesses: vec![std::collections::HashMap::new(); shard_count],
             placement,
+            replicated_users: HashSet::new(),
         })
     }
     pub fn with_placement_and_cache(
@@ -385,7 +388,7 @@ impl ShardedGraph {
 
         Ok(graph)
     }
-    fn try_shard_for(&self, user_id: u64) -> Option<usize> {
+    pub(crate) fn try_shard_for(&self, user_id: u64) -> Option<usize> {
         if user_id == 0 {
             return None;
         }
@@ -418,7 +421,7 @@ impl ShardedGraph {
         }
     }
 
-    fn shard_for(&self, user_id: u64) -> usize {
+    pub(crate) fn shard_for(&self, user_id: u64) -> usize {
         self.try_shard_for(user_id)
             .unwrap_or_else(|| panic!("User ID {user_id} is outside the configured placement"))
     }
@@ -499,13 +502,13 @@ impl ShardedGraph {
 
         self.shards[shard_id].get_following_ids(source)
     }
-    fn invalidate_cached_adjacency(&mut self, shard_id: usize, user_id: u64) {
+    pub(crate) fn invalidate_cached_adjacency(&mut self, shard_id: usize, user_id: u64) {
         if let Some(caches) = self.caches.as_mut() {
             caches[shard_id].invalidate(user_id);
         }
     }
 
-    fn record_observed_adjacency_access(&mut self, shard_id: usize, user_id: u64) {
+    pub(crate) fn record_observed_adjacency_access(&mut self, shard_id: usize, user_id: u64) {
         let access_count = self.observed_adjacency_accesses[shard_id]
             .entry(user_id)
             .or_insert(0);
