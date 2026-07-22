@@ -1,5 +1,6 @@
 pub mod balanced;
 pub mod cache;
+pub mod distributed;
 pub mod sharded;
 pub mod uneven;
 pub mod workload;
