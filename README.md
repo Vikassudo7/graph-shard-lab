@@ -180,8 +180,6 @@ Configuration: 4 shard workers, 100 query sources, 3 repetitions per source (300
 
 The batched implementation reduced median latency by **59.92%** and p99 latency by **74.13%** in this simulated workload.
 
-Raw results: `results/distributed_latency.csv`
-
 ### Degree-based cache warming
 
 The warming experiment preloads the most-followed hubs before measured traffic begins.
@@ -226,7 +224,6 @@ Real cache warming produced the following startup result:
 
 Across the complete workload, warming improved the hit rate by only **0.12 percentage points** at the largest capacity, since the cold LRU cache learns the hot set during normal traffic.
 
-![Cold versus degree-warmed real shard-local cache startup](docs/images/real_sharded_cache_warming.svg)
 
 > These measurements show cache reuse, not query-speed improvement. The shards and caches still run inside one process, and real latency is not measured.
 
@@ -347,7 +344,7 @@ Every sharded query is checked against a normal, non-sharded reference graph:
 4. Sort the result sets.
 5. Confirm that all results match.
 
-The benchmark stops if any strategy returns an incorrect answer. See the test suite for the current passing-test count.
+The benchmark stops if any strategy returns an incorrect answer. The current test suite contains **28 passing tests**.
 
 ## Metrics
 
@@ -392,7 +389,7 @@ Current benchmark families:
 4. **Hub-heavy workload** — a small set of hub users receives a large share of incoming edges and repeated adjacency reads.
 5. **Cold-cache sweep** — the hub-heavy access stream replayed through bounded LRU caches with capacities from 25 to 1,000.
 6. **Cache-warming sweep** — the same access stream tested with caches preloaded using the most-followed hubs.
-7. **Distributed latency benchmark** — the async Tokio shard simulation, comparing direct and batched two-hop queries under simulated per-message network delay.
+
 
 ---
 
