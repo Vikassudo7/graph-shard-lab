@@ -506,12 +506,35 @@ GraphShard Lab is a research prototype rather than a production distributed data
 - Workloads are synthetic.
 - Replication and recovery are not implemented.
 
+## Cache policies
+
+GraphShard Lab supports shard-local LRU, FIFO, and LFU adjacency caches.
+
+The cache-policy benchmark runs identical two-hop workloads with identical cache capacities, compares cold and warmed behavior, verifies cached results against uncached execution, and exports results to:
+
+`results/cache_policy_benchmark.csv`
+
+The cache implementation includes:
+
+* Entry-count and approximate byte-capacity limits
+* Targeted invalidation when edges change
+* Observed-traffic cache warming
+* Average O(1) LRU and FIFO bookkeeping
+* Ordered LFU eviction with O(log n) updates
+* Shared immutable adjacency lists that avoid cloning vectors on cache hits
+
+Run the benchmark with:
+
+```bash
+cargo run --release --bin cache_policy_benchmark
+```
+
 ## Future work
 
-- Cache-policy benchmarks
-- Hot-node replication
-- Dynamic shard rebalancing
-- Persistent storage and recovery
+* Hot-node replication
+* Oversized-community splitting
+* Dynamic shard rebalancing
+* Persistent snapshots and operation-log recovery
 
 ## Conclusion
 
